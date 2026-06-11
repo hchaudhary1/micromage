@@ -1,6 +1,6 @@
 # Micromage Workflows
 
-Micromage is a Go-only workflow DAG UI shell inspired by Archon. It uses server-rendered HTML, embedded static assets, vanilla JavaScript, and Go-powered YAML parsing, validation, layout, and fake run streaming.
+Micromage is a Go-only workflow DAG UI shell. It uses server-rendered HTML, embedded static assets, vanilla JavaScript, and Go-powered YAML parsing, validation, layout, and fake run streaming.
 
 ## Requirements
 
@@ -75,7 +75,7 @@ internal/web/                  HTTP handlers and tests
 ## Current Behavior
 
 - Provides embedded workflow templates for linear, parallel, and approval-gate DAGs
-- Lets developers edit Archon-like YAML in a split view
+- Lets developers edit workflow YAML in a split view
 - Validates workflow structure and renders a deterministic SVG DAG preview
 - Shows read-only node details for selected graph nodes
 - Streams a fake run over Server-Sent Events using topological layers

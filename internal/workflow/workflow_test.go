@@ -27,7 +27,7 @@ nodes:
     trigger_rule: all_success
 `
 
-func TestParseYAMLAcceptsArchonLikeWorkflow(t *testing.T) {
+func TestParseYAMLAcceptsWorkflowMetadata(t *testing.T) {
 	workflow, issues := ParseYAML(validWorkflowYAML)
 
 	if HasErrors(issues) {
