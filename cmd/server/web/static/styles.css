@@ -125,15 +125,28 @@ h1 {
   gap: 10px;
 }
 
-.toolbar select {
+.toolbar select,
+.toolbar input {
   min-height: 38px;
-  min-width: 210px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--paper);
   color: var(--ink);
   padding: 0 10px;
   font-weight: 700;
+}
+
+#template-select {
+  width: min(260px, 24vw);
+}
+
+#run-arguments {
+  width: min(320px, 26vw);
+  font-weight: 600;
+}
+
+#run-mode {
+  width: 108px;
 }
 
 .state-pill,
@@ -401,9 +414,16 @@ h1 {
     flex-wrap: wrap;
   }
 
-  .toolbar select {
+  .toolbar select,
+  .toolbar input {
     flex: 1;
     min-width: 180px;
+  }
+
+  #template-select,
+  #run-arguments,
+  #run-mode {
+    width: auto;
   }
 
   .workspace {

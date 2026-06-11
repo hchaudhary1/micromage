@@ -2,6 +2,8 @@ const templateSelect = document.querySelector("#template-select");
 const yamlEditor = document.querySelector("#yaml-editor");
 const previewState = document.querySelector("#preview-state");
 const runButton = document.querySelector("#run-button");
+const runArguments = document.querySelector("#run-arguments");
+const runMode = document.querySelector("#run-mode");
 const workflowSummary = document.querySelector("#workflow-summary");
 const workflowName = document.querySelector("#workflow-name");
 const workflowDescription = document.querySelector("#workflow-description");
@@ -45,7 +47,11 @@ async function updatePreview() {
   const response = await fetch("/api/preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ yaml: yamlEditor.value }),
+    body: JSON.stringify({
+      yaml: yamlEditor.value,
+      arguments: runArguments.value,
+      mode: runMode.value,
+    }),
   });
   currentPreview = await response.json();
   renderPreview(currentPreview);

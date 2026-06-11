@@ -43,6 +43,11 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 		return err
 	}
 
+	statuses := map[string]string{}
+	var firstErr error
+	failed := map[string]bool{}
+	completedAfterFailure := map[string]bool{}
+
 	for _, layer := range scheduleLayers(workflow.Nodes) {
 		if len(layer.Nodes) == 0 {
 			continue
@@ -51,33 +56,117 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 			return err
 		}
 
+		type runResult struct {
+			nodeID string
+			err    error
+		}
 		var wg sync.WaitGroup
-		errs := make(chan error, len(layer.Nodes)*3)
+		results := make(chan runResult, len(layer.Nodes))
 		for _, node := range layer.Nodes {
 			node := node
+			if !shouldRunNode(node, statuses) {
+				statuses[node.ID] = "skipped"
+				if err := emitSafe(RunEvent{Type: "node_skipped", NodeID: node.ID, Layer: layer.Index, Message: "skipped " + node.ID}); err != nil {
+					return err
+				}
+				continue
+			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				errs <- emitSafe(RunEvent{Type: "node_start", NodeID: node.ID, Layer: layer.Index, Message: "starting " + node.ID})
-				if err := runner.RunNode(ctx, node, emitSafe); err != nil {
-					errs <- err
+				if err := emitSafe(RunEvent{Type: "node_start", NodeID: node.ID, Layer: layer.Index, Message: "starting " + node.ID}); err != nil {
+					results <- runResult{nodeID: node.ID, err: err}
 					return
 				}
-				errs <- emitSafe(RunEvent{Type: "node_complete", NodeID: node.ID, Layer: layer.Index, Message: "completed " + node.ID})
+				if err := runner.RunNode(ctx, node, emitSafe); err != nil {
+					if emitErr := emitSafe(RunEvent{Type: "node_failed", NodeID: node.ID, Layer: layer.Index, Message: err.Error()}); emitErr != nil {
+						results <- runResult{nodeID: node.ID, err: emitErr}
+						return
+					}
+					results <- runResult{nodeID: node.ID, err: err}
+					return
+				}
+				if err := emitSafe(RunEvent{Type: "node_complete", NodeID: node.ID, Layer: layer.Index, Message: "completed " + node.ID}); err != nil {
+					results <- runResult{nodeID: node.ID, err: err}
+					return
+				}
+				results <- runResult{nodeID: node.ID}
 			}()
 		}
 		wg.Wait()
-		close(errs)
-		for err := range errs {
-			if err != nil {
-				return err
+		close(results)
+		for result := range results {
+			if result.err != nil {
+				if firstErr == nil {
+					firstErr = result.err
+				}
+				statuses[result.nodeID] = "failed"
+				failed[result.nodeID] = true
+				continue
+			}
+			statuses[result.nodeID] = "success"
+		}
+		for _, node := range layer.Nodes {
+			if statuses[node.ID] == "success" {
+				for _, dep := range node.DependsOn {
+					if failed[dep] {
+						completedAfterFailure[dep] = true
+					}
+				}
 			}
 		}
 		if err := emitSafe(RunEvent{Type: "layer_complete", Layer: layer.Index, Message: layerMessage("completed layer", layer.Nodes)}); err != nil {
 			return err
 		}
 	}
+	if firstErr != nil && hasUntoleratedFailure(failed, completedAfterFailure) {
+		return firstErr
+	}
 	return emitSafe(RunEvent{Type: "workflow_complete", Message: "completed " + workflow.Name})
+}
+
+func shouldRunNode(node Node, statuses map[string]string) bool {
+	if len(node.DependsOn) == 0 {
+		return true
+	}
+	successes := 0
+	failures := 0
+	done := 0
+	for _, dep := range node.DependsOn {
+		switch statuses[dep] {
+		case "success":
+			successes++
+			done++
+		case "failed":
+			failures++
+			done++
+		case "skipped":
+			done++
+		}
+	}
+	rule := node.TriggerRule
+	if rule == "" {
+		rule = "all_success"
+	}
+	switch rule {
+	case "one_success":
+		return successes > 0
+	case "none_failed_min_one_success":
+		return failures == 0 && successes > 0
+	case "all_done":
+		return done == len(node.DependsOn)
+	default:
+		return successes == len(node.DependsOn)
+	}
+}
+
+func hasUntoleratedFailure(failed map[string]bool, completedAfterFailure map[string]bool) bool {
+	for id := range failed {
+		if !completedAfterFailure[id] {
+			return true
+		}
+	}
+	return false
 }
 
 type ScheduledLayer struct {

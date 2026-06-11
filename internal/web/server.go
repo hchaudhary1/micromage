@@ -5,6 +5,10 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 
 	"micromage/internal/workflow"
 )
@@ -12,6 +16,7 @@ import (
 type Server struct {
 	templates         *template.Template
 	workflowTemplates []workflow.Template
+	commands          workflow.CommandRegistry
 	mux               *http.ServeMux
 }
 
@@ -30,10 +35,15 @@ func NewServer(assets fs.FS) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	commands, err := workflow.LoadCommands(assets, "web/commands/*.md")
+	if err != nil {
+		return nil, err
+	}
 
 	server := &Server{
 		templates:         templates,
 		workflowTemplates: workflowTemplates,
+		commands:          workflow.NewCommandRegistry(commands),
 		mux:               http.NewServeMux(),
 	}
 
@@ -73,18 +83,30 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The preview endpoint makes Go the source of truth for graph structure.
-	writeJSON(w, http.StatusOK, workflow.BuildPreview(input))
+	writeJSON(w, http.StatusOK, workflow.BuildPreviewWithCommands(input, s.commands))
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
-	input, ok := readYAMLRequest(w, r)
+	request, ok := readRunRequest(w, r)
 	if !ok {
 		return
 	}
 
-	preview := workflow.BuildPreview(input)
+	preview := workflow.BuildPreviewWithCommands(request.YAML, s.commands)
 	if !preview.CanRun {
 		writeJSON(w, http.StatusBadRequest, preview)
+		return
+	}
+	mode := request.Mode
+	if mode == "" {
+		mode = "simulate"
+	}
+	if mode != "simulate" && mode != "real" {
+		http.Error(w, "invalid run mode", http.StatusBadRequest)
+		return
+	}
+	if mode == "real" && os.Getenv("MICROMAGE_ENABLE_REAL_RUNS") != "1" {
+		http.Error(w, "real runs require MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
 		return
 	}
 
@@ -112,27 +134,61 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
-	if err := workflow.Execute(r.Context(), preview.Workflow, workflow.LoggingRunner{}, emit); err != nil {
+	runner := workflow.NodeRunner(workflow.LoggingRunner{})
+	if mode == "real" {
+		runID := "run-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		runner = workflow.NewRealRunner(workflow.RealRunnerConfig{
+			Commands:        s.commands,
+			CWD:             mustGetwd(),
+			Arguments:       request.Arguments,
+			WorkflowID:      runID,
+			ArtifactsDir:    filepath.Join(os.TempDir(), "micromage-runs", runID),
+			BaseBranch:      os.Getenv("MICROMAGE_BASE_BRANCH"),
+			DefaultProvider: preview.Workflow.Provider,
+			DefaultModel:    preview.Workflow.Model,
+			Unsafe:          os.Getenv("MICROMAGE_OPENCODE_UNSAFE") == "1",
+		})
+	}
+
+	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
 		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
 	}
 }
 
 type yamlRequest struct {
-	YAML string `json:"yaml"`
+	YAML      string `json:"yaml"`
+	Arguments string `json:"arguments"`
+	Mode      string `json:"mode"`
 }
 
 func readYAMLRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	request, ok := readRunRequest(w, r)
+	if !ok {
+		return "", false
+	}
+	return request.YAML, true
+}
+
+func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) {
 	defer r.Body.Close()
 	var request yamlRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return "", false
+		return yamlRequest{}, false
 	}
-	return request.YAML, true
+	return request, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func mustGetwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return cwd
 }

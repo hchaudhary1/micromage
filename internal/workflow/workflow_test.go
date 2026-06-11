@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -22,6 +24,10 @@ nodes:
     prompt: |
       Create a plan.
     model: medium
+    context: fresh
+    agent: general
+    idle_timeout: 60000
+    allowed_tools: []
   - id: implement
     command: implement
     depends_on: [plan]
@@ -48,6 +54,9 @@ func TestParseYAMLAcceptsWorkflowMetadata(t *testing.T) {
 	}
 	if workflow.Nodes[0].Kind() != "prompt" || workflow.Nodes[1].Kind() != "command" || workflow.Nodes[2].Kind() != "bash" {
 		t.Fatalf("unexpected node kinds: %s %s %s", workflow.Nodes[0].Kind(), workflow.Nodes[1].Kind(), workflow.Nodes[2].Kind())
+	}
+	if workflow.Nodes[0].Context != "fresh" || workflow.Nodes[0].Agent != "general" || workflow.Nodes[0].IdleTimeout == nil || len(workflow.Nodes[0].AllowedTools) != 0 {
+		t.Fatalf("expected opencode runtime metadata, got %#v", workflow.Nodes[0])
 	}
 }
 
@@ -233,6 +242,10 @@ nodes:
         Then test
     model: medium
     provider: local
+    context: fresh
+    agent: general
+    idle_timeout: 60000
+    allowed_tools: []
     when: ready
     trigger_rule: all_done
     mcp: filesystem
@@ -253,12 +266,12 @@ nodes:
 		t.Fatalf("expected two nodes, got %#v", first.Graph.Nodes)
 	}
 	node := first.Graph.Nodes[0]
-	for _, badge := range []string{"medium", "local", "when", "all_done", "mcp", "skills", "hooks"} {
+	for _, badge := range []string{"medium", "local", "fresh", "general", "when", "all_done", "mcp", "skills", "hooks"} {
 		if !containsString(node.Badges, badge) {
 			t.Fatalf("expected badge %q in %#v", badge, node.Badges)
 		}
 	}
-	if node.Metadata["preview"] != "Write code" || node.Summary != "Write code" || node.X == 0 || node.Y == 0 {
+	if node.Metadata["preview"] != "Write code" || node.Metadata["context"] != "fresh" || node.Metadata["agent"] != "general" || node.Summary != "Write code" || node.X == 0 || node.Y == 0 {
 		t.Fatalf("unexpected node view metadata: %#v", node)
 	}
 }
@@ -341,6 +354,43 @@ nodes:
 	}
 }
 
+func TestExecuteAllowsOneSuccessJoinAfterParallelFailure(t *testing.T) {
+	workflow, issues := ParseYAML(`name: review
+description: review branches
+nodes:
+  - id: sync
+    prompt: sync
+  - id: code-review
+    prompt: code
+    depends_on: [sync]
+  - id: docs-impact
+    prompt: docs
+    depends_on: [sync]
+  - id: synthesize
+    prompt: synthesize
+    depends_on: [code-review, docs-impact]
+    trigger_rule: one_success
+`)
+	if HasErrors(issues) {
+		t.Fatalf("expected valid workflow, got %#v", issues)
+	}
+
+	var events []RunEvent
+	err := Execute(context.Background(), workflow, selectiveFailRunner{failID: "docs-impact"}, func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected tolerated branch failure, got %v", err)
+	}
+	if !hasNodeEvent(events, "node_complete", "synthesize") {
+		t.Fatalf("expected synthesize to run after one successful review, got %#v", events)
+	}
+	if !hasNodeEvent(events, "node_failed", "docs-impact") {
+		t.Fatalf("expected failed review event, got %#v", events)
+	}
+}
+
 func TestLoadTemplatesReturnsSortedMetadataAndReadErrors(t *testing.T) {
 	source := fstest.MapFS{
 		"workflows/z-last.yaml":  {Data: []byte("name: Z Last\ndescription: Last\nnodes:\n  - id: z\n    command: z\n")},
@@ -365,6 +415,117 @@ func TestLoadTemplatesReturnsSortedMetadataAndReadErrors(t *testing.T) {
 	broken := fstest.MapFS{"workflows/broken.yaml": {Mode: 0o755 | fs.ModeDir}}
 	if _, err := LoadTemplates(broken, "workflows/*.yaml"); err == nil {
 		t.Fatal("expected read error for directory template")
+	}
+}
+
+func TestLoadCommandsReturnsSortedPromptMetadata(t *testing.T) {
+	source := fstest.MapFS{
+		"commands/z-last.md":  {Data: []byte("---\ndescription: Last command\nargument-hint: <last>\n---\n# Last\nBody")},
+		"commands/a-first.md": {Data: []byte("---\ndescription: First command\n---\n# First\nBody")},
+	}
+
+	commands, err := LoadCommands(source, "commands/*.md")
+	if err != nil {
+		t.Fatalf("LoadCommands returned error: %v", err)
+	}
+	if len(commands) != 2 || commands[0].ID != "a-first" || commands[1].ID != "z-last" {
+		t.Fatalf("expected sorted command IDs, got %#v", commands)
+	}
+	if commands[0].Description != "First command" || !strings.Contains(commands[0].Body, "# First") {
+		t.Fatalf("expected parsed command metadata and body, got %#v", commands[0])
+	}
+	if commands[1].ArgumentHint != "<last>" {
+		t.Fatalf("expected argument hint, got %#v", commands[1])
+	}
+}
+
+func TestBuildPreviewWithCommandsReportsMissingCommand(t *testing.T) {
+	registry := NewCommandRegistry([]Command{{ID: "known", Body: "Known command"}})
+	preview := BuildPreviewWithCommands(`name: commands
+description: commands
+nodes:
+  - id: known
+    command: known
+  - id: missing
+    command: missing
+`, registry)
+
+	if preview.CanRun || !containsMessage(preview.Issues, "command missing was not found") {
+		t.Fatalf("expected missing command issue, got %#v", preview)
+	}
+}
+
+func TestOpenCodeProviderBuildsExpectedCommand(t *testing.T) {
+	args := BuildOpenCodeArgs("opencode/nemotron-3-ultra-free", "/repo", "hello", false)
+	want := []string{"run", "--model", "opencode/nemotron-3-ultra-free", "--format", "json", "--dir", "/repo", "hello"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected opencode args: %#v", args)
+	}
+	unsafeArgs := BuildOpenCodeArgs("opencode/nemotron-3-ultra-free", "/repo", "hello", true)
+	if !containsString(unsafeArgs, "--dangerously-skip-permissions") {
+		t.Fatalf("expected unsafe flag when explicitly enabled, got %#v", unsafeArgs)
+	}
+}
+
+func TestRealRunnerRunsBashWithArgumentsArtifactsAndOutputs(t *testing.T) {
+	dir := t.TempDir()
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:          dir,
+		Arguments:    "feature input",
+		WorkflowID:   "run-1",
+		ArtifactsDir: dir,
+		BaseBranch:   "main",
+	})
+	runner.outputs["plan"] = "ready"
+
+	var logs []string
+	err := runner.RunNode(context.Background(), Node{ID: "verify", Bash: `printf "%s|%s|%s|%s" "$ARGUMENTS" "$WORKFLOW_ID" "$BASE_BRANCH" "$plan.output"`}, func(event RunEvent) error {
+		if event.Type == "node_log" {
+			logs = append(logs, event.Message)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunNode returned error: %v", err)
+	}
+	if got := strings.Join(logs, "\n"); got != "feature input|run-1|main|ready" {
+		t.Fatalf("unexpected bash output: %q", got)
+	}
+}
+
+func TestRealRunnerFailsUnsupportedRealNodeKinds(t *testing.T) {
+	runner := NewRealRunner(RealRunnerConfig{})
+	err := runner.RunNode(context.Background(), Node{ID: "approve", Approval: map[string]any{"prompt": "continue?"}}, func(RunEvent) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "unsupported real node kind") {
+		t.Fatalf("expected unsupported node error, got %v", err)
+	}
+}
+
+func TestOpenCodeProviderSmokeOptIn(t *testing.T) {
+	if os.Getenv("MICROMAGE_OPENCODE_E2E") != "1" {
+		t.Skip("set MICROMAGE_OPENCODE_E2E=1 to run the local OpenCode smoke test")
+	}
+	if _, err := exec.LookPath("opencode"); err != nil {
+		t.Skipf("opencode unavailable: %v", err)
+	}
+
+	var logs []string
+	output, err := (OpenCodeProvider{}).RunPrompt(context.Background(), PromptRequest{
+		Prompt: "Reply with exactly MICROMAGE_OPENCODE_OK and do not edit files.",
+		CWD:    t.TempDir(),
+		Model:  DefaultOpenCodeModel,
+		Node:   Node{ID: "opencode-smoke", Prompt: "smoke"},
+	}, func(event RunEvent) error {
+		if event.Type == "node_log" {
+			logs = append(logs, event.Message)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("OpenCode smoke failed: %v; logs=%q", err, strings.Join(logs, "\n"))
+	}
+	if !strings.Contains(output, "MICROMAGE_OPENCODE_OK") {
+		t.Fatalf("expected smoke marker in output %q; logs=%q", output, strings.Join(logs, "\n"))
 	}
 }
 
@@ -405,10 +566,30 @@ func countEvents(events []RunEvent, eventType string) int {
 	return count
 }
 
+func hasNodeEvent(events []RunEvent, eventType string, nodeID string) bool {
+	for _, event := range events {
+		if event.Type == eventType && event.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
 type failingRunner struct {
 	err error
 }
 
 func (runner failingRunner) RunNode(context.Context, Node, EventSink) error {
 	return runner.err
+}
+
+type selectiveFailRunner struct {
+	failID string
+}
+
+func (runner selectiveFailRunner) RunNode(_ context.Context, node Node, emit EventSink) error {
+	if node.ID == runner.failID {
+		return errors.New("selected failure")
+	}
+	return emit(RunEvent{Type: "node_log", NodeID: node.ID, Message: "ok"})
 }

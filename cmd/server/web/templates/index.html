@@ -20,6 +20,11 @@
 
       <div class="toolbar">
         <select id="template-select" aria-label="Workflow template"></select>
+        <input id="run-arguments" type="text" placeholder="Feature input" aria-label="Workflow input">
+        <select id="run-mode" aria-label="Run mode">
+          <option value="simulate">Simulate</option>
+          <option value="real">Real</option>
+        </select>
         <span id="preview-state" class="state-pill">Preview</span>
         <button id="run-button" type="button" disabled>Run</button>
       </div>

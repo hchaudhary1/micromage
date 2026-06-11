@@ -1,6 +1,9 @@
 package workflow
 
-import "sort"
+import (
+	"sort"
+	"strconv"
+)
 
 const (
 	NodeWidth  = 190
@@ -223,6 +226,12 @@ func nodeBadges(node Node) []string {
 	if node.Provider != "" {
 		badges = append(badges, node.Provider)
 	}
+	if node.Context != "" {
+		badges = append(badges, node.Context)
+	}
+	if node.Agent != "" {
+		badges = append(badges, node.Agent)
+	}
 	if node.When != "" {
 		badges = append(badges, "when")
 	}
@@ -257,6 +266,18 @@ func nodeMetadata(node Node) map[string]string {
 	}
 	if node.Model != "" {
 		metadata["model"] = node.Model
+	}
+	if node.Context != "" {
+		metadata["context"] = node.Context
+	}
+	if node.Agent != "" {
+		metadata["agent"] = node.Agent
+	}
+	if node.IdleTimeout != nil {
+		metadata["idle_timeout"] = strconv.Itoa(*node.IdleTimeout)
+	}
+	if len(node.AllowedTools) > 0 {
+		metadata["allowed_tools"] = stringsJoin(node.AllowedTools)
 	}
 	if node.When != "" {
 		metadata["when"] = node.When

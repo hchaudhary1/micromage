@@ -9,7 +9,7 @@ import (
 	"micromage/internal/web"
 )
 
-//go:embed web/templates/*.html web/static/* web/workflows/*.yaml
+//go:embed web/templates/*.html web/static/* web/workflows/*.yaml web/commands/*.md
 var assets embed.FS
 
 func main() {

@@ -155,7 +155,7 @@ func hasRuntimeMetadata(workflow Workflow) bool {
 		return true
 	}
 	for _, node := range workflow.Nodes {
-		if node.Provider != "" || node.Model != "" || node.Retry != nil || node.Hooks != nil || node.MCP != "" || len(node.Skills) > 0 || node.When != "" || node.Kind() == "approval" || node.Kind() == "loop" || node.Kind() == "script" {
+		if node.Provider != "" || node.Model != "" || node.Context != "" || node.Agent != "" || node.IdleTimeout != nil || len(node.AllowedTools) > 0 || node.Retry != nil || node.Hooks != nil || node.MCP != "" || len(node.Skills) > 0 || node.When != "" || node.Kind() == "approval" || node.Kind() == "loop" || node.Kind() == "script" {
 			return true
 		}
 	}

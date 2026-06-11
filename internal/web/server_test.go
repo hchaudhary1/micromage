@@ -12,7 +12,7 @@ import (
 	"micromage/internal/workflow"
 )
 
-//go:embed testdata/web/templates/*.html testdata/web/static/* testdata/web/workflows/*.yaml
+//go:embed testdata/web/templates/*.html testdata/web/static/* testdata/web/workflows/*.yaml testdata/web/commands/*.md
 var testAssets embed.FS
 
 func TestShellRendersWorkflowApp(t *testing.T) {
@@ -43,11 +43,56 @@ func TestTemplatesEndpointReturnsEmbeddedTemplates(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&templates); err != nil {
 		t.Fatalf("decode templates: %v", err)
 	}
-	if len(templates) != 3 {
-		t.Fatalf("expected three templates, got %#v", templates)
+	if len(templates) != 4 {
+		t.Fatalf("expected four templates, got %#v", templates)
 	}
 	if templates[0].YAML == "" || templates[0].Name == "" {
 		t.Fatalf("expected populated template metadata, got %#v", templates[0])
+	}
+	if !hasTemplate(templates, "idea-to-pr") {
+		t.Fatalf("expected idea-to-pr template, got %#v", templates)
+	}
+}
+
+func TestIdeaToPRTemplatePreviewsWithParallelReviewNodes(t *testing.T) {
+	server := newTestServer(t)
+	templatesResponse := httptest.NewRecorder()
+	server.ServeHTTP(templatesResponse, httptest.NewRequest(http.MethodGet, "/api/templates", nil))
+	var templates []workflow.Template
+	if err := json.NewDecoder(templatesResponse.Body).Decode(&templates); err != nil {
+		t.Fatalf("decode templates: %v", err)
+	}
+	var ideaTemplate workflow.Template
+	for _, template := range templates {
+		if template.ID == "idea-to-pr" {
+			ideaTemplate = template
+			break
+		}
+	}
+	if ideaTemplate.YAML == "" {
+		t.Fatal("idea-to-pr template not found")
+	}
+
+	response := postJSON(server, "/api/preview", `{"yaml": `+strconvQuote(ideaTemplate.YAML)+`}`)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	var preview workflow.Preview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if !preview.CanRun || len(preview.Graph.Nodes) != 17 {
+		t.Fatalf("expected runnable idea-to-pr graph, got %#v", preview)
+	}
+	reviewLayer := graphNodeLayer(preview.Graph.Nodes, "code-review")
+	if reviewLayer < 0 {
+		t.Fatalf("expected code-review node, got %#v", preview.Graph.Nodes)
+	}
+	for _, id := range []string{"error-handling", "test-coverage", "comment-quality", "docs-impact"} {
+		if graphNodeLayer(preview.Graph.Nodes, id) != reviewLayer {
+			t.Fatalf("expected parallel review node %s in review layer, got %#v", id, preview.Graph.Nodes)
+		}
 	}
 }
 
@@ -121,7 +166,7 @@ func TestPreviewEndpointReportsEmptyAndMalformedPayloads(t *testing.T) {
 func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 	server := newTestServer(t)
 
-	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n"}`)
+	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n", "mode": "simulate", "arguments": "feature input"}`)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", response.Code)
@@ -145,6 +190,17 @@ func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 		if !strings.Contains(body, frame) {
 			t.Fatalf("expected SSE frame %q in %q", frame, body)
 		}
+	}
+}
+
+func TestRunEndpointRejectsRealModeUnlessEnabled(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "")
+	server := newTestServer(t)
+
+	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n", "mode": "real"}`)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d with %q", response.Code, response.Body.String())
 	}
 }
 
@@ -200,4 +256,27 @@ func previewContainsIssue(preview workflow.Preview, field string) bool {
 		}
 	}
 	return false
+}
+
+func hasTemplate(templates []workflow.Template, id string) bool {
+	for _, template := range templates {
+		if template.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func graphNodeLayer(nodes []workflow.NodeView, id string) int {
+	for _, node := range nodes {
+		if node.ID == id {
+			return node.Layer
+		}
+	}
+	return -1
+}
+
+func strconvQuote(value string) string {
+	data, _ := json.Marshal(value)
+	return string(data)
 }

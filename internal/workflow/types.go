@@ -34,27 +34,31 @@ type Workflow struct {
 }
 
 type Node struct {
-	ID          string         `json:"id"`
-	DependsOn   []string       `json:"depends_on,omitempty"`
-	When        string         `json:"when,omitempty"`
-	TriggerRule string         `json:"trigger_rule,omitempty"`
-	Provider    string         `json:"provider,omitempty"`
-	Model       string         `json:"model,omitempty"`
-	Command     string         `json:"command,omitempty"`
-	Prompt      string         `json:"prompt,omitempty"`
-	Bash        string         `json:"bash,omitempty"`
-	Script      any            `json:"script,omitempty"`
-	Loop        any            `json:"loop,omitempty"`
-	Approval    any            `json:"approval,omitempty"`
-	Cancel      string         `json:"cancel,omitempty"`
-	Timeout     *int           `json:"timeout,omitempty"`
-	Retry       map[string]any `json:"retry,omitempty"`
-	Hooks       map[string]any `json:"hooks,omitempty"`
-	MCP         string         `json:"mcp,omitempty"`
-	Skills      []string       `json:"skills,omitempty"`
-	Extra       map[string]any `json:"extra,omitempty"`
-	fields      map[string]bool
-	typeIssues  []Issue
+	ID           string         `json:"id"`
+	DependsOn    []string       `json:"depends_on,omitempty"`
+	When         string         `json:"when,omitempty"`
+	TriggerRule  string         `json:"trigger_rule,omitempty"`
+	Provider     string         `json:"provider,omitempty"`
+	Model        string         `json:"model,omitempty"`
+	Context      string         `json:"context,omitempty"`
+	Agent        string         `json:"agent,omitempty"`
+	Command      string         `json:"command,omitempty"`
+	Prompt       string         `json:"prompt,omitempty"`
+	Bash         string         `json:"bash,omitempty"`
+	Script       any            `json:"script,omitempty"`
+	Loop         any            `json:"loop,omitempty"`
+	Approval     any            `json:"approval,omitempty"`
+	Cancel       string         `json:"cancel,omitempty"`
+	Timeout      *int           `json:"timeout,omitempty"`
+	Retry        map[string]any `json:"retry,omitempty"`
+	Hooks        map[string]any `json:"hooks,omitempty"`
+	MCP          string         `json:"mcp,omitempty"`
+	Skills       []string       `json:"skills,omitempty"`
+	IdleTimeout  *int           `json:"idle_timeout,omitempty"`
+	AllowedTools []string       `json:"allowed_tools,omitempty"`
+	Extra        map[string]any `json:"extra,omitempty"`
+	fields       map[string]bool
+	typeIssues   []Issue
 }
 
 type Issue struct {
@@ -109,24 +113,28 @@ func (w *Workflow) UnmarshalYAML(value *yaml.Node) error {
 
 func (n *Node) UnmarshalYAML(value *yaml.Node) error {
 	type rawNode struct {
-		ID          string         `yaml:"id"`
-		DependsOn   []string       `yaml:"depends_on"`
-		When        string         `yaml:"when"`
-		TriggerRule string         `yaml:"trigger_rule"`
-		Provider    string         `yaml:"provider"`
-		Model       string         `yaml:"model"`
-		Command     string         `yaml:"command"`
-		Prompt      string         `yaml:"prompt"`
-		Bash        string         `yaml:"bash"`
-		Script      any            `yaml:"script"`
-		Loop        any            `yaml:"loop"`
-		Approval    any            `yaml:"approval"`
-		Cancel      string         `yaml:"cancel"`
-		Timeout     *int           `yaml:"timeout"`
-		Retry       map[string]any `yaml:"retry"`
-		Hooks       map[string]any `yaml:"hooks"`
-		MCP         string         `yaml:"mcp"`
-		Skills      []string       `yaml:"skills"`
+		ID           string         `yaml:"id"`
+		DependsOn    []string       `yaml:"depends_on"`
+		When         string         `yaml:"when"`
+		TriggerRule  string         `yaml:"trigger_rule"`
+		Provider     string         `yaml:"provider"`
+		Model        string         `yaml:"model"`
+		Context      string         `yaml:"context"`
+		Agent        string         `yaml:"agent"`
+		Command      string         `yaml:"command"`
+		Prompt       string         `yaml:"prompt"`
+		Bash         string         `yaml:"bash"`
+		Script       any            `yaml:"script"`
+		Loop         any            `yaml:"loop"`
+		Approval     any            `yaml:"approval"`
+		Cancel       string         `yaml:"cancel"`
+		Timeout      *int           `yaml:"timeout"`
+		Retry        map[string]any `yaml:"retry"`
+		Hooks        map[string]any `yaml:"hooks"`
+		MCP          string         `yaml:"mcp"`
+		Skills       []string       `yaml:"skills"`
+		IdleTimeout  *int           `yaml:"idle_timeout"`
+		AllowedTools []string       `yaml:"allowed_tools"`
 	}
 
 	var raw rawNode
@@ -150,6 +158,8 @@ func (n *Node) UnmarshalYAML(value *yaml.Node) error {
 	n.TriggerRule = strings.TrimSpace(raw.TriggerRule)
 	n.Provider = strings.TrimSpace(raw.Provider)
 	n.Model = strings.TrimSpace(raw.Model)
+	n.Context = strings.TrimSpace(raw.Context)
+	n.Agent = strings.TrimSpace(raw.Agent)
 	n.Command = strings.TrimSpace(raw.Command)
 	n.Prompt = strings.TrimSpace(raw.Prompt)
 	n.Bash = strings.TrimSpace(raw.Bash)
@@ -162,7 +172,9 @@ func (n *Node) UnmarshalYAML(value *yaml.Node) error {
 	n.Hooks = raw.Hooks
 	n.MCP = strings.TrimSpace(raw.MCP)
 	n.Skills = trimStrings(raw.Skills)
-	n.Extra = removeKeys(extra, "id", "depends_on", "when", "trigger_rule", "provider", "model", "command", "prompt", "bash", "script", "loop", "approval", "cancel", "timeout", "retry", "hooks", "mcp", "skills")
+	n.IdleTimeout = raw.IdleTimeout
+	n.AllowedTools = trimStrings(raw.AllowedTools)
+	n.Extra = removeKeys(extra, "id", "depends_on", "when", "trigger_rule", "provider", "model", "context", "agent", "command", "prompt", "bash", "script", "loop", "approval", "cancel", "timeout", "retry", "hooks", "mcp", "skills", "idle_timeout", "allowed_tools")
 	n.fields = fields
 	return nil
 }
@@ -176,11 +188,40 @@ func (n Node) Kind() string {
 }
 
 func (n Node) kindFields() []string {
+	if n.fields == nil {
+		return n.inferredKindFields()
+	}
 	var kinds []string
 	for _, key := range []string{"command", "prompt", "bash", "script", "loop", "approval", "cancel"} {
 		if n.fields[key] {
 			kinds = append(kinds, key)
 		}
+	}
+	return kinds
+}
+
+func (n Node) inferredKindFields() []string {
+	var kinds []string
+	if n.Command != "" {
+		kinds = append(kinds, "command")
+	}
+	if n.Prompt != "" {
+		kinds = append(kinds, "prompt")
+	}
+	if n.Bash != "" {
+		kinds = append(kinds, "bash")
+	}
+	if !isEmptyValue(n.Script) {
+		kinds = append(kinds, "script")
+	}
+	if !isEmptyValue(n.Loop) {
+		kinds = append(kinds, "loop")
+	}
+	if !isEmptyValue(n.Approval) {
+		kinds = append(kinds, "approval")
+	}
+	if n.Cancel != "" {
+		kinds = append(kinds, "cancel")
 	}
 	return kinds
 }

@@ -1,6 +1,6 @@
 # Micromage Workflows
 
-Micromage is a Go-only workflow DAG UI shell. It uses server-rendered HTML, embedded static assets, vanilla JavaScript, and Go-powered YAML parsing, validation, layout, and fake run streaming.
+Micromage is a Go-only workflow DAG UI shell. It uses server-rendered HTML, embedded static assets, vanilla JavaScript, and Go-powered YAML parsing, validation, layout, command prompts, and guarded workflow execution.
 
 ## Requirements
 
@@ -44,6 +44,14 @@ go tool cover -func=coverage.out
 
 The project target is at least 70% total code coverage.
 
+Run the opt-in local OpenCode smoke test:
+
+```sh
+MICROMAGE_OPENCODE_E2E=1 go test ./internal/workflow -run TestOpenCodeProviderSmokeOptIn
+```
+
+The smoke test uses `opencode/nemotron-3-ultra-free` and skips unless explicitly enabled.
+
 ## Git Hooks
 
 This repo includes a tracked pre-commit hook at:
@@ -67,19 +75,39 @@ cmd/server/                    Go entrypoint and embedded web assets
 cmd/server/web/templates/      HTML templates
 cmd/server/web/static/         CSS and vanilla JavaScript
 cmd/server/web/workflows/      Embedded starter workflow YAML templates
-internal/workflow/             YAML parsing, validation, layout, templates, and fake runner
+cmd/server/web/commands/       Embedded command prompt Markdown assets
+internal/workflow/             YAML parsing, validation, layout, templates, commands, and runners
 internal/web/                  HTTP handlers and tests
 .githooks/                     Tracked Git hooks
 ```
 
 ## Current Behavior
 
-- Provides embedded workflow templates for linear, parallel, and approval-gate DAGs
+- Provides embedded workflow templates for linear, parallel, approval-gate, and idea-to-PR DAGs
+- Provides embedded command prompt assets for command nodes
 - Lets developers edit workflow YAML in a split view
 - Validates workflow structure and renders a deterministic SVG DAG preview
+- Validates command references against embedded command assets
 - Shows read-only node details for selected graph nodes
-- Streams a fake run over Server-Sent Events using topological layers
-- Does not persist edited YAML or execute real providers, commands, scripts, hooks, MCP, skills, approvals, or worktrees yet
+- Streams a simulated run over Server-Sent Events by default
+- Supports guarded real runs for `prompt`, `command`, and `bash` nodes through the OpenCode CLI
+- Does not execute scripts, hooks, MCP, skills, approvals, or worktrees yet
+
+## Real Runs
+
+Real execution is opt-in because workflows can modify files, create commits, push branches, and open PRs.
+
+```sh
+MICROMAGE_ENABLE_REAL_RUNS=1 go run ./cmd/server
+```
+
+Then call `/api/run` with `mode: "real"` and optional `arguments`. OpenCode runs use:
+
+```text
+opencode run --model opencode/nemotron-3-ultra-free --format json --dir <repo> <prompt>
+```
+
+Set `MICROMAGE_OPENCODE_UNSAFE=1` only when you intentionally want Micromage to append OpenCode's `--dangerously-skip-permissions` flag.
 
 ## Development Notes
 
