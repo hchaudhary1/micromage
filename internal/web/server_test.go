@@ -43,14 +43,17 @@ func TestTemplatesEndpointReturnsEmbeddedTemplates(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&templates); err != nil {
 		t.Fatalf("decode templates: %v", err)
 	}
-	if len(templates) != 4 {
-		t.Fatalf("expected four templates, got %#v", templates)
+	if len(templates) != 5 {
+		t.Fatalf("expected five templates, got %#v", templates)
 	}
 	if templates[0].YAML == "" || templates[0].Name == "" {
 		t.Fatalf("expected populated template metadata, got %#v", templates[0])
 	}
 	if !hasTemplate(templates, "idea-to-pr") {
 		t.Fatalf("expected idea-to-pr template, got %#v", templates)
+	}
+	if !hasTemplate(templates, "review-last-commit") {
+		t.Fatalf("expected review-last-commit template, got %#v", templates)
 	}
 }
 
@@ -93,6 +96,51 @@ func TestIdeaToPRTemplatePreviewsWithParallelReviewNodes(t *testing.T) {
 		if graphNodeLayer(preview.Graph.Nodes, id) != reviewLayer {
 			t.Fatalf("expected parallel review node %s in review layer, got %#v", id, preview.Graph.Nodes)
 		}
+	}
+}
+
+func TestReviewLastCommitTemplatePreviewsWithParallelReviewNodes(t *testing.T) {
+	server := newTestServer(t)
+	templatesResponse := httptest.NewRecorder()
+	server.ServeHTTP(templatesResponse, httptest.NewRequest(http.MethodGet, "/api/templates", nil))
+	var templates []workflow.Template
+	if err := json.NewDecoder(templatesResponse.Body).Decode(&templates); err != nil {
+		t.Fatalf("decode templates: %v", err)
+	}
+	var reviewTemplate workflow.Template
+	for _, template := range templates {
+		if template.ID == "review-last-commit" {
+			reviewTemplate = template
+			break
+		}
+	}
+	if reviewTemplate.YAML == "" {
+		t.Fatal("review-last-commit template not found")
+	}
+
+	response := postJSON(server, "/api/preview", `{"yaml": `+strconvQuote(reviewTemplate.YAML)+`}`)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	var preview workflow.Preview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if !preview.CanRun || len(preview.Graph.Nodes) != 7 {
+		t.Fatalf("expected runnable review-last-commit graph, got %#v", preview)
+	}
+	reviewLayer := graphNodeLayer(preview.Graph.Nodes, "code-review")
+	if reviewLayer < 0 {
+		t.Fatalf("expected code-review node, got %#v", preview.Graph.Nodes)
+	}
+	for _, id := range []string{"error-handling", "test-coverage", "comment-quality", "docs-impact"} {
+		if graphNodeLayer(preview.Graph.Nodes, id) != reviewLayer {
+			t.Fatalf("expected parallel review node %s in review layer, got %#v", id, preview.Graph.Nodes)
+		}
+	}
+	if graphNodeLayer(preview.Graph.Nodes, "synthesize") <= reviewLayer {
+		t.Fatalf("expected synthesize after review layer, got %#v", preview.Graph.Nodes)
 	}
 }
 

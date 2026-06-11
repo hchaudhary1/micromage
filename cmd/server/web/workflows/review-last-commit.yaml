@@ -1,0 +1,130 @@
+name: review-last-commit
+description: |
+  Review HEAD with five parallel specialist agents, then synthesize findings.
+  This workflow gathers git context locally and does not create branches, commits, pushes, or PRs.
+provider: opencode
+model: opencode/nemotron-3-ultra-free
+tags: [review, git, opencode]
+nodes:
+  - id: collect-context
+    bash: |
+      set -eu
+      REVIEW_DIR="$ARTIFACTS_DIR/review-last-commit"
+      CONTEXT="$REVIEW_DIR/context.md"
+      mkdir -p "$REVIEW_DIR"
+
+      {
+        echo "# Last Commit Review Context"
+        echo
+        echo "## Commit"
+        git show --stat --oneline --decorate --no-renames HEAD
+        echo
+        echo "## Changed Files"
+        git show --name-status --format= HEAD
+        echo
+        echo "## Diff"
+        if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+          git diff --no-ext-diff --find-renames HEAD^ HEAD
+        else
+          git show --no-ext-diff --find-renames --format= HEAD
+        fi
+      } > "$CONTEXT"
+
+      # Review scope is captured once so every specialist reviews the same commit.
+      printf "%s\n" "$CONTEXT"
+
+  - id: code-review
+    prompt: |
+      Review the last commit for correctness bugs, maintainability risks, and project-rule violations.
+      Read AGENTS.md and the shared context at:
+      $collect-context.output
+
+      Write findings to $ARTIFACTS_DIR/review-last-commit/code-review-findings.md.
+      Use severity, file references, and concrete fixes. If there are no findings, write that clearly.
+    depends_on: [collect-context]
+    context: fresh
+    agent: general
+    idle_timeout: 120000
+
+  - id: error-handling
+    prompt: |
+      Review the last commit for missing error handling, unsafe command behavior, failed-edge behavior, and confusing failure modes.
+      Read AGENTS.md and the shared context at:
+      $collect-context.output
+
+      Write findings to $ARTIFACTS_DIR/review-last-commit/error-handling-findings.md.
+      Use severity, file references, and concrete fixes. If there are no findings, write that clearly.
+    depends_on: [collect-context]
+    context: fresh
+    agent: general
+    idle_timeout: 120000
+
+  - id: test-coverage
+    prompt: |
+      Review whether the last commit has enough tests and keeps the project near its coverage goals.
+      Read AGENTS.md and the shared context at:
+      $collect-context.output
+
+      Write findings to $ARTIFACTS_DIR/review-last-commit/test-coverage-findings.md.
+      Focus on missing tests that would catch real regressions. If coverage looks sufficient, write that clearly.
+    depends_on: [collect-context]
+    context: fresh
+    agent: general
+    idle_timeout: 120000
+
+  - id: comment-quality
+    prompt: |
+      Review comments added or changed by the last commit.
+      Read AGENTS.md and the shared context at:
+      $collect-context.output
+
+      Write findings to $ARTIFACTS_DIR/review-last-commit/comment-quality-findings.md.
+      Check that comments explain business intent instead of syntax. If comments look sufficient, write that clearly.
+    depends_on: [collect-context]
+    context: fresh
+    agent: general
+    idle_timeout: 120000
+
+  - id: docs-impact
+    prompt: |
+      Review whether the last commit changes user-facing behavior, workflows, commands, environment variables, or docs expectations.
+      Read AGENTS.md and the shared context at:
+      $collect-context.output
+
+      Write findings to $ARTIFACTS_DIR/review-last-commit/docs-impact-findings.md.
+      Call out required README, docs, or template updates. If no docs change is needed, write that clearly.
+    depends_on: [collect-context]
+    context: fresh
+    agent: general
+    idle_timeout: 120000
+
+  - id: synthesize
+    prompt: |
+      Synthesize the last-commit review.
+
+      Shared context:
+      $collect-context.output
+
+      Reviewer outputs:
+      code-review:
+      $code-review.output
+
+      error-handling:
+      $error-handling.output
+
+      test-coverage:
+      $test-coverage.output
+
+      comment-quality:
+      $comment-quality.output
+
+      docs-impact:
+      $docs-impact.output
+
+      Read any available files under $ARTIFACTS_DIR/review-last-commit, deduplicate findings, prioritize real bugs and missing tests, and write $ARTIFACTS_DIR/review-last-commit/consolidated-review.md.
+      Do not create branches, commits, pushes, or PRs.
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+    agent: general
+    idle_timeout: 120000

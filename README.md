@@ -83,7 +83,7 @@ internal/web/                  HTTP handlers and tests
 
 ## Current Behavior
 
-- Provides embedded workflow templates for linear, parallel, approval-gate, and idea-to-PR DAGs
+- Provides embedded workflow templates for linear, parallel, approval-gate, idea-to-PR, and last-commit review DAGs
 - Provides embedded command prompt assets for command nodes
 - Lets developers edit workflow YAML in a split view
 - Validates workflow structure and renders a deterministic SVG DAG preview
@@ -91,6 +91,7 @@ internal/web/                  HTTP handlers and tests
 - Shows read-only node details for selected graph nodes
 - Streams a simulated run over Server-Sent Events by default
 - Supports guarded real runs for `prompt`, `command`, and `bash` nodes through the OpenCode CLI
+- Substitutes `$ARGUMENTS`, `$WORKFLOW_ID`, `$ARTIFACTS_DIR`, and `$node.output` references into real AI prompts
 - Does not execute scripts, hooks, MCP, skills, approvals, or worktrees yet
 
 ## Real Runs

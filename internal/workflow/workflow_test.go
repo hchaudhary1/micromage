@@ -493,6 +493,36 @@ func TestRealRunnerRunsBashWithArgumentsArtifactsAndOutputs(t *testing.T) {
 	}
 }
 
+func TestRealRunnerExpandsOutputsInPromptNodes(t *testing.T) {
+	provider := &captureProvider{}
+	runner := NewRealRunner(RealRunnerConfig{
+		Arguments:       "review HEAD",
+		WorkflowID:      "run-2",
+		ArtifactsDir:    "/tmp/micromage-review",
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+	runner.outputs["collect-context"] = `{"context_path":"/tmp/micromage-review/context.md","summary":"last commit"}`
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:     "code-review",
+		Prompt: "Review $collect-context.output.context_path for $collect-context.output.summary using $ARGUMENTS in $ARTIFACTS_DIR.",
+	}, func(RunEvent) error { return nil })
+	if err != nil {
+		t.Fatalf("RunNode returned error: %v", err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %#v", provider.requests)
+	}
+	want := "Review /tmp/micromage-review/context.md for last commit using review HEAD in /tmp/micromage-review."
+	if provider.requests[0].Prompt != want {
+		t.Fatalf("unexpected prompt:\nwant %q\n got %q", want, provider.requests[0].Prompt)
+	}
+	if runner.outputs["code-review"] != "captured" {
+		t.Fatalf("expected prompt output to be captured, got %#v", runner.outputs)
+	}
+}
+
 func TestRealRunnerFailsUnsupportedRealNodeKinds(t *testing.T) {
 	runner := NewRealRunner(RealRunnerConfig{})
 	err := runner.RunNode(context.Background(), Node{ID: "approve", Approval: map[string]any{"prompt": "continue?"}}, func(RunEvent) error { return nil })
@@ -509,12 +539,17 @@ func TestOpenCodeProviderSmokeOptIn(t *testing.T) {
 		t.Skipf("opencode unavailable: %v", err)
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
 	var logs []string
 	output, err := (OpenCodeProvider{}).RunPrompt(context.Background(), PromptRequest{
 		Prompt: "Reply with exactly MICROMAGE_OPENCODE_OK and do not edit files.",
-		CWD:    t.TempDir(),
-		Model:  DefaultOpenCodeModel,
-		Node:   Node{ID: "opencode-smoke", Prompt: "smoke"},
+		// Smoke tests use the package repo so OpenCode has the same project context as real runs.
+		CWD:   cwd,
+		Model: DefaultOpenCodeModel,
+		Node:  Node{ID: "opencode-smoke", Prompt: "smoke"},
 	}, func(event RunEvent) error {
 		if event.Type == "node_log" {
 			logs = append(logs, event.Message)
@@ -564,6 +599,15 @@ func countEvents(events []RunEvent, eventType string) int {
 		}
 	}
 	return count
+}
+
+type captureProvider struct {
+	requests []PromptRequest
+}
+
+func (provider *captureProvider) RunPrompt(_ context.Context, request PromptRequest, _ EventSink) (string, error) {
+	provider.requests = append(provider.requests, request)
+	return "captured", nil
 }
 
 func hasNodeEvent(events []RunEvent, eventType string, nodeID string) bool {

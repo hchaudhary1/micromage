@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 )
 
 const DefaultOpenCodeModel = "opencode/nemotron-3-ultra-free"
@@ -54,6 +56,7 @@ type RealRunner struct {
 	baseBranch      string
 	defaultProvider string
 	defaultModel    string
+	outputMu        sync.Mutex
 	outputs         map[string]string
 }
 
@@ -90,7 +93,7 @@ func (runner *RealRunner) RunNode(ctx context.Context, node Node, emit EventSink
 	}
 	switch node.Kind() {
 	case "prompt":
-		return runner.runAI(ctx, node, node.Prompt, emit)
+		return runner.runAI(ctx, node, runner.expandPrompt(node.Prompt), emit)
 	case "command":
 		command, ok := runner.commands[node.Command]
 		if !ok {
@@ -101,7 +104,7 @@ func (runner *RealRunner) RunNode(ctx context.Context, node Node, emit EventSink
 	case "bash":
 		output, err := runner.runBash(ctx, node, emit)
 		if err == nil {
-			runner.outputs[node.ID] = output
+			runner.setOutput(node.ID, output)
 		}
 		return err
 	default:
@@ -138,7 +141,7 @@ func (runner *RealRunner) runAI(ctx context.Context, node Node, prompt string, e
 		ArtifactsDir: runner.artifactsDir,
 	}, emit)
 	if err == nil {
-		runner.outputs[node.ID] = output
+		runner.setOutput(node.ID, output)
 	}
 	return err
 }
@@ -175,7 +178,7 @@ func (runner *RealRunner) env() []string {
 		"ARTIFACTS_DIR="+runner.artifactsDir,
 		"BASE_BRANCH="+runner.baseBranch,
 	)
-	for id, output := range runner.outputs {
+	for id, output := range runner.snapshotOutputs() {
 		env = append(env, "NODE_"+envName(id)+"_OUTPUT="+output)
 	}
 	return env
@@ -190,20 +193,68 @@ func (runner *RealRunner) expandPrompt(prompt string) string {
 	for key, value := range replacements {
 		prompt = strings.ReplaceAll(prompt, key, value)
 	}
-	return prompt
+	// Runtime context lets review agents consume collected scope without re-running setup.
+	return runner.substitutePromptOutputs(prompt)
 }
 
 func (runner *RealRunner) substituteOutputs(script string) string {
-	for id, output := range runner.outputs {
+	return runner.substituteOutputsWith(script, shellEscape)
+}
+
+func (runner *RealRunner) substitutePromptOutputs(prompt string) string {
+	return runner.substituteOutputsWith(prompt, func(value string) string { return value })
+}
+
+func (runner *RealRunner) substituteOutputsWith(text string, formatValue func(string) string) string {
+	outputs := runner.snapshotOutputs()
+	ids := make([]string, 0, len(outputs))
+	for id := range outputs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if len(ids[i]) == len(ids[j]) {
+			return ids[i] < ids[j]
+		}
+		return len(ids[i]) > len(ids[j])
+	})
+	for _, id := range ids {
+		output := outputs[id]
 		var object map[string]any
 		if json.Unmarshal([]byte(output), &object) == nil {
-			for key, value := range object {
-				script = strings.ReplaceAll(script, "$"+id+".output."+key, shellEscape(fmt.Sprint(value)))
+			keys := make([]string, 0, len(object))
+			for key := range object {
+				keys = append(keys, key)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if len(keys[i]) == len(keys[j]) {
+					return keys[i] < keys[j]
+				}
+				return len(keys[i]) > len(keys[j])
+			})
+			for _, key := range keys {
+				text = strings.ReplaceAll(text, "$"+id+".output."+key, formatValue(fmt.Sprint(object[key])))
 			}
 		}
-		script = strings.ReplaceAll(script, "$"+id+".output", shellEscape(output))
+		text = strings.ReplaceAll(text, "$"+id+".output", formatValue(output))
 	}
-	return script
+	return text
+}
+
+func (runner *RealRunner) setOutput(id string, output string) {
+	runner.outputMu.Lock()
+	defer runner.outputMu.Unlock()
+	// Parallel review nodes all publish artifacts into the same downstream context.
+	runner.outputs[id] = output
+}
+
+func (runner *RealRunner) snapshotOutputs() map[string]string {
+	runner.outputMu.Lock()
+	defer runner.outputMu.Unlock()
+	outputs := make(map[string]string, len(runner.outputs))
+	for id, output := range runner.outputs {
+		outputs[id] = output
+	}
+	return outputs
 }
 
 type OpenCodeProvider struct {
