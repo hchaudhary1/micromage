@@ -23,3 +23,9 @@ coverage.*
 
 # Ignore the default binary name if someone runs `go build ./cmd/server` locally.
 /server
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
