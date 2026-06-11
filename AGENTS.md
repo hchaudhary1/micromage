@@ -1,0 +1,3 @@
+- we need to be test driven on all features
+- we should try to maintain 70% code coverage
+- as you write code, be sure to leave in comments explaining the bussiness reason for the code change. just 1 small line should do. do not explain syntax, but explain the intent behind.
