@@ -85,6 +85,39 @@ func TestPreviewEndpointKeepsInvalidGraphButDisablesRun(t *testing.T) {
 	}
 }
 
+func TestPreviewEndpointReportsEmptyAndMalformedPayloads(t *testing.T) {
+	server := newTestServer(t)
+
+	invalidJSON := postRaw(server, "/api/preview", `{`)
+	if invalidJSON.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid JSON to return 400, got %d", invalidJSON.Code)
+	}
+
+	emptyYAML := postJSON(server, "/api/preview", `{"yaml": "   "}`)
+	if emptyYAML.Code != http.StatusOK {
+		t.Fatalf("expected empty YAML preview to return 200, got %d", emptyYAML.Code)
+	}
+	var emptyPreview workflow.Preview
+	if err := json.NewDecoder(emptyYAML.Body).Decode(&emptyPreview); err != nil {
+		t.Fatalf("decode empty preview: %v", err)
+	}
+	if emptyPreview.CanRun || !previewContainsIssue(emptyPreview, "yaml") {
+		t.Fatalf("expected empty YAML issue, got %#v", emptyPreview)
+	}
+
+	malformedYAML := postJSON(server, "/api/preview", `{"yaml": "name: [unterminated"}`)
+	if malformedYAML.Code != http.StatusOK {
+		t.Fatalf("expected malformed YAML preview to return 200, got %d", malformedYAML.Code)
+	}
+	var malformedPreview workflow.Preview
+	if err := json.NewDecoder(malformedYAML.Body).Decode(&malformedPreview); err != nil {
+		t.Fatalf("decode malformed preview: %v", err)
+	}
+	if malformedPreview.CanRun || !previewContainsIssue(malformedPreview, "yaml") || len(malformedPreview.Graph.Nodes) != 0 {
+		t.Fatalf("expected syntax issue without graph nodes, got %#v", malformedPreview)
+	}
+}
+
 func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 	server := newTestServer(t)
 
@@ -100,12 +133,35 @@ func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 	if !strings.Contains(body, "workflow_start") || !strings.Contains(body, "would run prompt node plan") {
 		t.Fatalf("expected fake run events, got %q", body)
 	}
+	for _, frame := range []string{
+		"event: workflow_start\ndata:",
+		"event: layer_start\ndata:",
+		"event: node_start\ndata:",
+		"event: node_log\ndata:",
+		"event: node_complete\ndata:",
+		"event: layer_complete\ndata:",
+		"event: workflow_complete\ndata:",
+	} {
+		if !strings.Contains(body, frame) {
+			t.Fatalf("expected SSE frame %q in %q", frame, body)
+		}
+	}
 }
 
 func TestRunEndpointRejectsInvalidWorkflow(t *testing.T) {
 	server := newTestServer(t)
 
 	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n    depends_on: [missing]\n"}`)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", response.Code)
+	}
+}
+
+func TestRunEndpointRejectsInvalidJSON(t *testing.T) {
+	server := newTestServer(t)
+
+	response := postRaw(server, "/api/run", `{`)
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", response.Code)
@@ -126,9 +182,22 @@ func newTestServer(t *testing.T) http.Handler {
 }
 
 func postJSON(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
+	return postRaw(handler, path, body)
+}
+
+func postRaw(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func previewContainsIssue(preview workflow.Preview, field string) bool {
+	for _, issue := range preview.Issues {
+		if issue.Field == field {
+			return true
+		}
+	}
+	return false
 }

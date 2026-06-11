@@ -105,6 +105,15 @@ func validateExecutableContent(node Node, kind string) []Issue {
 		if isEmptyValue(node.Script) {
 			return []Issue{{Level: IssueError, NodeID: node.ID, Field: "script", Message: "script cannot be empty"}}
 		}
+	case "loop":
+		// Executable nodes need real payloads so previews do not bless placeholders.
+		if isEmptyValue(node.Loop) {
+			return []Issue{{Level: IssueError, NodeID: node.ID, Field: "loop", Message: "loop cannot be empty"}}
+		}
+	case "approval":
+		if isEmptyValue(node.Approval) {
+			return []Issue{{Level: IssueError, NodeID: node.ID, Field: "approval", Message: "approval cannot be empty"}}
+		}
 	case "cancel":
 		if node.Cancel == "" {
 			return []Issue{{Level: IssueError, NodeID: node.ID, Field: "cancel", Message: "cancel reason cannot be empty"}}
@@ -132,6 +141,10 @@ func isEmptyValue(value any) bool {
 		return true
 	case string:
 		return strings.TrimSpace(typed) == ""
+	case map[string]any:
+		return len(typed) == 0
+	case []any:
+		return len(typed) == 0
 	default:
 		return false
 	}
