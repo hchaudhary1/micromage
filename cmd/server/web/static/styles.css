@@ -1,0 +1,267 @@
+:root {
+  color-scheme: light;
+  --ink: #1d252c;
+  --muted: #65727f;
+  --line: #d9e0e7;
+  --panel: #f6f8fa;
+  --paper: #ffffff;
+  --green: #2f8f6b;
+  --amber: #b7791f;
+  --rose: #b4233a;
+  --focus: #2563eb;
+  --shadow: 0 10px 30px rgba(24, 34, 45, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    linear-gradient(90deg, rgba(37, 99, 235, 0.05) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(47, 143, 107, 0.05) 1px, transparent 1px),
+    var(--panel);
+  background-size: 42px 42px;
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--green);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button:hover {
+  filter: brightness(0.95);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--focus) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  min-height: 72px;
+  padding: 14px clamp(16px, 3vw, 32px);
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(14px);
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, transparent 0 46%, rgba(255, 255, 255, 0.78) 46% 54%, transparent 54%),
+    linear-gradient(135deg, var(--green), var(--amber));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5), var(--shadow);
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.15rem;
+  line-height: 1.2;
+}
+
+.topbar p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.board {
+  display: grid;
+  grid-auto-columns: minmax(280px, 320px);
+  grid-auto-flow: column;
+  gap: 16px;
+  min-height: calc(100vh - 72px);
+  overflow-x: auto;
+  padding: clamp(16px, 3vw, 32px);
+  align-items: start;
+}
+
+.column {
+  display: grid;
+  grid-template-rows: auto minmax(160px, 1fr) auto;
+  gap: 12px;
+  max-height: calc(100vh - 112px);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: var(--shadow);
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+}
+
+.column h2 {
+  font-size: 0.98rem;
+  line-height: 1.2;
+}
+
+.count {
+  min-width: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.cards {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 120px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.cards.is-over {
+  border-radius: 8px;
+  background: rgba(47, 143, 107, 0.08);
+}
+
+.card {
+  position: relative;
+  min-height: 138px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 6px 18px rgba(24, 34, 45, 0.07);
+}
+
+.card.dragging {
+  opacity: 0.58;
+}
+
+.card-form,
+.add-card {
+  display: grid;
+  gap: 8px;
+}
+
+.card-title,
+.card textarea,
+.add-card input,
+.add-card textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+}
+
+.card-title,
+.add-card input {
+  min-height: 38px;
+  padding: 8px 10px;
+  font-weight: 700;
+}
+
+.card textarea,
+.add-card textarea {
+  min-height: 68px;
+  resize: vertical;
+  padding: 9px 10px;
+  color: var(--muted);
+}
+
+.secondary-button {
+  width: fit-content;
+  min-width: 72px;
+  padding: 0 14px;
+  background: #e8f3ee;
+  color: #176348;
+}
+
+.delete-form {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  line-height: 1;
+}
+
+.danger {
+  background: #fff0f2;
+  color: var(--rose);
+}
+
+.add-card {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.add-card button {
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    min-height: 64px;
+  }
+
+  .board {
+    grid-auto-columns: minmax(86vw, 1fr);
+    min-height: calc(100vh - 64px);
+    padding: 12px;
+  }
+
+  .column {
+    max-height: calc(100vh - 88px);
+  }
+}

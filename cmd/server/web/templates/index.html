@@ -1,0 +1,59 @@
+{{define "index.html"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-lockup" aria-label="{{.Title}}">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>{{.Title}}</h1>
+        <p>{{len .Columns}} lists</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="board" aria-label="Kanban board">
+    {{range .Columns}}
+      <section class="column" data-column-id="{{.ID}}" aria-labelledby="column-{{.ID}}">
+        <header class="column-header">
+          <h2 id="column-{{.ID}}">{{.Title}}</h2>
+          <span class="count" aria-label="{{len .Cards}} cards">{{len .Cards}}</span>
+        </header>
+
+        <div class="cards" data-card-list>
+          {{range .Cards}}
+            <article class="card" draggable="true" data-card-id="{{.ID}}">
+              <form class="card-form" method="post" action="/cards/update">
+                <input type="hidden" name="card_id" value="{{.ID}}">
+                <input class="card-title" name="title" value="{{.Title}}" aria-label="Card title" required>
+                <textarea name="description" aria-label="Card description" rows="3">{{.Description}}</textarea>
+                <button class="secondary-button" type="submit">Save</button>
+              </form>
+              <form class="delete-form" method="post" action="/cards/delete">
+                <input type="hidden" name="card_id" value="{{.ID}}">
+                <button class="icon-button danger" type="submit" aria-label="Delete card" title="Delete card">×</button>
+              </form>
+            </article>
+          {{end}}
+        </div>
+
+        <form class="add-card" method="post" action="/cards">
+          <input type="hidden" name="column_id" value="{{.ID}}">
+          <input name="title" placeholder="New card title" aria-label="New card title" required>
+          <textarea name="description" placeholder="Description" aria-label="New card description" rows="2"></textarea>
+          <button type="submit">Add card</button>
+        </form>
+      </section>
+    {{end}}
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
