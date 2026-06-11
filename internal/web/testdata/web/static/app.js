@@ -1,1 +1,1 @@
-console.log("test asset")
+window.micromageTestAsset = true;

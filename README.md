@@ -1,13 +1,13 @@
-# Micromage Kanban
+# Micromage Workflows
 
-Micromage is a small Trello-like kanban website written in Go. The app uses server-rendered HTML, embedded static assets, and vanilla JavaScript for drag-and-drop card movement.
+Micromage is a Go-only workflow DAG UI shell inspired by Archon. It uses server-rendered HTML, embedded static assets, vanilla JavaScript, and Go-powered YAML parsing, validation, layout, and fake run streaming.
 
 ## Requirements
 
 - Go 1.22 or newer
 - Git
 
-No Node, NPM, Tailwind, Vite, Webpack, or frontend package manager is required.
+No Node, NPM, Tailwind, Vite, Webpack, or frontend package manager is required. Go libraries are allowed when they fit the project.
 
 ## Run The App
 
@@ -63,26 +63,29 @@ The hook runs Go tests with coverage and blocks commits below 70% total coverage
 ## Project Layout
 
 ```text
-cmd/server/                 Go entrypoint and embedded web assets
-cmd/server/web/templates/   HTML templates
-cmd/server/web/static/      CSS and vanilla JavaScript
-internal/kanban/            Board domain logic and tests
-internal/web/               HTTP handlers and tests
-.githooks/                  Tracked Git hooks
+cmd/server/                    Go entrypoint and embedded web assets
+cmd/server/web/templates/      HTML templates
+cmd/server/web/static/         CSS and vanilla JavaScript
+cmd/server/web/workflows/      Embedded starter workflow YAML templates
+internal/workflow/             YAML parsing, validation, layout, templates, and fake runner
+internal/web/                  HTTP handlers and tests
+.githooks/                     Tracked Git hooks
 ```
 
 ## Current Behavior
 
-- Shows a kanban board with To Do, Doing, Review, and Done columns
-- Creates cards through standard HTML forms
-- Edits card title and description inline
-- Deletes cards
-- Moves and reorders cards with browser drag-and-drop
-- Stores board data in memory for the current server process
+- Provides embedded workflow templates for linear, parallel, and approval-gate DAGs
+- Lets developers edit Archon-like YAML in a split view
+- Validates workflow structure and renders a deterministic SVG DAG preview
+- Shows read-only node details for selected graph nodes
+- Streams a fake run over Server-Sent Events using topological layers
+- Does not persist edited YAML or execute real providers, commands, scripts, hooks, MCP, skills, approvals, or worktrees yet
 
 ## Development Notes
 
 - Keep the app Go-first and dependency-light.
+- Avoid NPM dependencies at all costs.
+- Golang libraries are allowed when they fit the project.
 - Add or update tests with each feature change.
 - Maintain at least 70% total coverage.
 - Leave short comments for business intent when adding non-obvious code paths.

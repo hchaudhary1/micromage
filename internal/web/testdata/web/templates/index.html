@@ -1,1 +1,14 @@
-{{define "index.html"}}Test {{.Title}} {{range .Columns}}{{.Title}} {{range .Cards}}{{.Title}} {{end}}{{end}}{{end}}
+{{define "index.html"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{.Title}}</title>
+</head>
+<body>
+  <h1>{{.Title}}</h1>
+  <textarea id="yaml-editor"></textarea>
+  <svg id="dag-svg"></svg>
+</body>
+</html>
+{{end}}

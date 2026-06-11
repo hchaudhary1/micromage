@@ -1,23 +1,21 @@
 package web
 
 import (
-	"errors"
+	"encoding/json"
 	"html/template"
 	"io/fs"
 	"net/http"
-	"strconv"
-	"strings"
 
-	"micromage/internal/kanban"
+	"micromage/internal/workflow"
 )
 
 type Server struct {
-	store     *kanban.Store
-	templates *template.Template
-	mux       *http.ServeMux
+	templates         *template.Template
+	workflowTemplates []workflow.Template
+	mux               *http.ServeMux
 }
 
-func NewServer(store *kanban.Store, assets fs.FS) (*Server, error) {
+func NewServer(assets fs.FS) (*Server, error) {
 	templates, err := template.ParseFS(assets, "web/templates/*.html")
 	if err != nil {
 		return nil, err
@@ -28,18 +26,22 @@ func NewServer(store *kanban.Store, assets fs.FS) (*Server, error) {
 		return nil, err
 	}
 
+	workflowTemplates, err := workflow.LoadTemplates(assets, "web/workflows/*.yaml")
+	if err != nil {
+		return nil, err
+	}
+
 	server := &Server{
-		store:     store,
-		templates: templates,
-		mux:       http.NewServeMux(),
+		templates:         templates,
+		workflowTemplates: workflowTemplates,
+		mux:               http.NewServeMux(),
 	}
 
 	server.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
-	server.mux.HandleFunc("GET /", server.handleBoard)
-	server.mux.HandleFunc("POST /cards", server.handleCreateCard)
-	server.mux.HandleFunc("POST /cards/update", server.handleUpdateCard)
-	server.mux.HandleFunc("POST /cards/delete", server.handleDeleteCard)
-	server.mux.HandleFunc("POST /cards/move", server.handleMoveCard)
+	server.mux.HandleFunc("GET /", server.handleShell)
+	server.mux.HandleFunc("GET /api/templates", server.handleTemplates)
+	server.mux.HandleFunc("POST /api/preview", server.handlePreview)
+	server.mux.HandleFunc("POST /api/run", server.handleRun)
 
 	return server, nil
 }
@@ -48,97 +50,89 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.templates.ExecuteTemplate(w, "index.html", s.store.Snapshot()); err != nil {
-		http.Error(w, "could not render board", http.StatusInternalServerError)
+	data := struct {
+		Title string
+	}{
+		Title: "Micromage Workflows",
+	}
+	if err := s.templates.ExecuteTemplate(w, "index.html", data); err != nil {
+		http.Error(w, "could not render workflow shell", http.StatusInternalServerError)
 	}
 }
 
-func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
-		return
-	}
-
-	_, err := s.store.AddCard(r.FormValue("column_id"), r.FormValue("title"), r.FormValue("description"))
-	if err != nil {
-		respondBoardError(w, err)
-		return
-	}
-
-	// Redirects keep browser refreshes from creating duplicate cards.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.workflowTemplates)
 }
 
-func (s *Server) handleUpdateCard(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	input, ok := readYAMLRequest(w, r)
+	if !ok {
 		return
 	}
 
-	_, err := s.store.UpdateCard(r.FormValue("card_id"), r.FormValue("title"), r.FormValue("description"))
-	if err != nil {
-		respondBoardError(w, err)
-		return
-	}
-
-	// Redirects keep edit submissions aligned with the latest board snapshot.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	// The preview endpoint makes Go the source of truth for graph structure.
+	writeJSON(w, http.StatusOK, workflow.BuildPreview(input))
 }
 
-func (s *Server) handleDeleteCard(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	input, ok := readYAMLRequest(w, r)
+	if !ok {
 		return
 	}
 
-	if err := s.store.DeleteCard(r.FormValue("card_id")); err != nil {
-		respondBoardError(w, err)
+	preview := workflow.BuildPreview(input)
+	if !preview.CanRun {
+		writeJSON(w, http.StatusBadRequest, preview)
 		return
 	}
 
-	// Redirects make delete actions predictable for keyboard-only users too.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func (s *Server) handleMoveCard(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	index, err := strconv.Atoi(r.FormValue("index"))
-	if err != nil {
-		index = 0
+	emit := func(event workflow.RunEvent) error {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("event: " + event.Type + "\n")); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("data: " + string(data) + "\n\n")); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
 	}
 
-	err = s.store.MoveCard(r.FormValue("card_id"), r.FormValue("column_id"), index)
-	if err != nil {
-		respondBoardError(w, err)
-		return
-	}
-
-	if wantsJSON(r) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// Non-JavaScript submissions can still converge on the updated board.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func respondBoardError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, kanban.ErrBlankTitle):
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, kanban.ErrColumnNotFound), errors.Is(err, kanban.ErrCardNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
-	default:
-		http.Error(w, "could not update board", http.StatusInternalServerError)
+	if err := workflow.Execute(r.Context(), preview.Workflow, workflow.LoggingRunner{}, emit); err != nil {
+		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
 	}
 }
 
-func wantsJSON(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("Accept"), "application/json")
+type yamlRequest struct {
+	YAML string `json:"yaml"`
+}
+
+func readYAMLRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	defer r.Body.Close()
+	var request yamlRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return "", false
+	}
+	return request.YAML, true
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
 }

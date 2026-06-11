@@ -1,0 +1,18 @@
+name: plan-implement-verify
+description: Plan the change, implement it, then run the deterministic verification command.
+provider: codex
+model: medium
+tags: [starter, feature]
+nodes:
+  - id: plan
+    prompt: |
+      Create a concise implementation plan for the requested change.
+
+  - id: implement
+    prompt: |
+      Implement the plan and keep the diff focused.
+    depends_on: [plan]
+
+  - id: verify
+    bash: go test ./...
+    depends_on: [implement]

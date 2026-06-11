@@ -8,50 +8,54 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand-lockup" aria-label="{{.Title}}">
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup" aria-label="{{.Title}}">
       <span class="brand-mark" aria-hidden="true"></span>
       <div>
         <h1>{{.Title}}</h1>
-        <p>{{len .Columns}} lists</p>
+        <p id="workflow-summary">Loading templates</p>
       </div>
-    </div>
-  </header>
+      </div>
 
-  <main class="board" aria-label="Kanban board">
-    {{range .Columns}}
-      <section class="column" data-column-id="{{.ID}}" aria-labelledby="column-{{.ID}}">
-        <header class="column-header">
-          <h2 id="column-{{.ID}}">{{.Title}}</h2>
-          <span class="count" aria-label="{{len .Cards}} cards">{{len .Cards}}</span>
-        </header>
+      <div class="toolbar">
+        <select id="template-select" aria-label="Workflow template"></select>
+        <span id="preview-state" class="state-pill">Preview</span>
+        <button id="run-button" type="button" disabled>Run</button>
+      </div>
+    </header>
 
-        <div class="cards" data-card-list>
-          {{range .Cards}}
-            <article class="card" draggable="true" data-card-id="{{.ID}}">
-              <form class="card-form" method="post" action="/cards/update">
-                <input type="hidden" name="card_id" value="{{.ID}}">
-                <input class="card-title" name="title" value="{{.Title}}" aria-label="Card title" required>
-                <textarea name="description" aria-label="Card description" rows="3">{{.Description}}</textarea>
-                <button class="secondary-button" type="submit">Save</button>
-              </form>
-              <form class="delete-form" method="post" action="/cards/delete">
-                <input type="hidden" name="card_id" value="{{.ID}}">
-                <button class="icon-button danger" type="submit" aria-label="Delete card" title="Delete card">×</button>
-              </form>
-            </article>
-          {{end}}
+    <main class="workspace">
+      <section class="editor-pane" aria-label="YAML editor">
+        <textarea id="yaml-editor" spellcheck="false"></textarea>
+      </section>
+
+      <section class="graph-pane" aria-label="Workflow graph">
+        <div class="graph-header">
+          <div>
+            <h2 id="workflow-name">Workflow</h2>
+            <p id="workflow-description"></p>
+          </div>
+          <div id="issue-counts" class="issue-counts"></div>
         </div>
 
-        <form class="add-card" method="post" action="/cards">
-          <input type="hidden" name="column_id" value="{{.ID}}">
-          <input name="title" placeholder="New card title" aria-label="New card title" required>
-          <textarea name="description" placeholder="Description" aria-label="New card description" rows="2"></textarea>
-          <button type="submit">Add card</button>
-        </form>
+        <div class="graph-wrap">
+          <svg id="dag-svg" role="img" aria-label="DAG preview"></svg>
+        </div>
+
+        <div class="bottom-panels">
+          <section class="inspector" aria-label="Selected node">
+            <h3>Inspector</h3>
+            <div id="inspector-body" class="panel-body muted">Select a node</div>
+          </section>
+          <section class="run-log" aria-label="Run log">
+            <h3>Run log</h3>
+            <div id="run-log" class="panel-body log-lines"></div>
+          </section>
+        </div>
       </section>
-    {{end}}
-  </main>
+    </main>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

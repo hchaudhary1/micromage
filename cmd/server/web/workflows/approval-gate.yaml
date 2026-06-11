@@ -1,0 +1,23 @@
+name: approval-gate
+description: Plan, pause for review, then implement and verify.
+provider: codex
+model: medium
+nodes:
+  - id: plan
+    prompt: |
+      Draft the implementation plan and call out risky files.
+
+  - id: approve-plan
+    approval:
+      prompt: Review the plan before implementation starts.
+    depends_on: [plan]
+
+  - id: implement
+    prompt: |
+      Implement the approved plan.
+    depends_on: [approve-plan]
+
+  - id: verify
+    bash: go test ./...
+    depends_on: [implement]
+    trigger_rule: all_success

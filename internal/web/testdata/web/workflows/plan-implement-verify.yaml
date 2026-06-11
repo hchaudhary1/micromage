@@ -1,0 +1,8 @@
+name: plan-implement-verify
+description: Starter template
+nodes:
+  - id: plan
+    prompt: plan
+  - id: verify
+    bash: go test ./...
+    depends_on: [plan]
