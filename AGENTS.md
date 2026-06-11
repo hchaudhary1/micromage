@@ -3,4 +3,4 @@
 - as you write code, be sure to leave in comments explaining the bussiness reason for the code change. just 1 small line should do. do not explain syntax, but explain the intent behind.
 - avoid NPM dependencies at all costs
 - Golang libraries are allowed when they fit the project
-- this is a similar project: `/Users/hassan/Documents/EXAMPLE-for-inspiration`. Use it as a reference project to understand how they did things, when planing and making our own features.
+- these 2 are similar project: `/Users/hassan/Documents/EXAMPLE-1-node-workflows`, `/Users/hassan/Documents/EXAMPLE-2-kanban-workflows`.. Use them as a reference project to understand how they did things, when planing and making our own features.
