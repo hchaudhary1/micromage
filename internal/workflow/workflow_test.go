@@ -400,6 +400,50 @@ nodes:
 	}
 }
 
+func TestExecuteFailsOneSuccessJoinWithAllDependencyFailures(t *testing.T) {
+	workflow, issues := ParseYAML(`name: review
+description: review branches
+nodes:
+  - id: code-review
+    prompt: code
+  - id: docs-impact
+    prompt: docs
+  - id: synthesize
+    prompt: synthesize
+    depends_on: [code-review, docs-impact]
+    trigger_rule: one_success
+`)
+	if HasErrors(issues) {
+		t.Fatalf("expected valid workflow, got %#v", issues)
+	}
+
+	var events []RunEvent
+	err := Execute(context.Background(), workflow, selectedFailuresRunner{
+		errs: map[string]error{
+			"code-review": errors.New("code reviewer unavailable"),
+			"docs-impact": errors.New("docs reviewer unavailable"),
+		},
+	}, func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("expected all-failed one_success join error")
+	}
+	for _, want := range []string{"synthesize", "code-review: code reviewer unavailable", "docs-impact: docs reviewer unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to contain %q, got %v", want, err)
+		}
+	}
+	if !hasNodeEventWithMessage(events, "node_skipped", "synthesize", "no successful dependencies") {
+		t.Fatalf("expected actionable synthesize skip event, got %#v", events)
+	}
+	if hasNodeEvent(events, "workflow_complete", "") {
+		t.Fatalf("did not expect workflow_complete after all reviewers failed: %#v", events)
+	}
+}
+
 func TestLoadTemplatesReturnsSortedMetadataAndReadErrors(t *testing.T) {
 	source := fstest.MapFS{
 		"workflows/z-last.yaml":  {Data: []byte("name: Z Last\ndescription: Last\nnodes:\n  - id: z\n    command: z\n")},
@@ -895,6 +939,15 @@ func hasNodeEvent(events []RunEvent, eventType string, nodeID string) bool {
 	return false
 }
 
+func hasNodeEventWithMessage(events []RunEvent, eventType string, nodeID string, message string) bool {
+	for _, event := range events {
+		if event.Type == eventType && event.NodeID == nodeID && strings.Contains(event.Message, message) {
+			return true
+		}
+	}
+	return false
+}
+
 type failingRunner struct {
 	err error
 }
@@ -910,6 +963,17 @@ type selectiveFailRunner struct {
 func (runner selectiveFailRunner) RunNode(_ context.Context, node Node, emit EventSink) error {
 	if node.ID == runner.failID {
 		return errors.New("selected failure")
+	}
+	return emit(RunEvent{Type: "node_log", NodeID: node.ID, Message: "ok"})
+}
+
+type selectedFailuresRunner struct {
+	errs map[string]error
+}
+
+func (runner selectedFailuresRunner) RunNode(_ context.Context, node Node, emit EventSink) error {
+	if err := runner.errs[node.ID]; err != nil {
+		return err
 	}
 	return emit(RunEvent{Type: "node_log", NodeID: node.ID, Message: "ok"})
 }

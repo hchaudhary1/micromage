@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -45,7 +46,9 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 
 	statuses := map[string]string{}
 	var firstErr error
+	var workflowErr error
 	failed := map[string]bool{}
+	failureReasons := map[string]string{}
 	completedAfterFailure := map[string]bool{}
 
 	for _, layer := range scheduleLayers(workflow.Nodes) {
@@ -66,7 +69,14 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 			node := node
 			if !shouldRunNode(node, statuses) {
 				statuses[node.ID] = "skipped"
-				if err := emitSafe(RunEvent{Type: "node_skipped", NodeID: node.ID, Layer: layer.Index, Message: "skipped " + node.ID}); err != nil {
+				message := "skipped " + node.ID
+				if err := oneSuccessSkipError(node, statuses, failureReasons); err != nil {
+					message = err.Error()
+					if workflowErr == nil {
+						workflowErr = err
+					}
+				}
+				if err := emitSafe(RunEvent{Type: "node_skipped", NodeID: node.ID, Layer: layer.Index, Message: message}); err != nil {
 					return err
 				}
 				continue
@@ -102,6 +112,7 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 				}
 				statuses[result.nodeID] = "failed"
 				failed[result.nodeID] = true
+				failureReasons[result.nodeID] = result.err.Error()
 				continue
 			}
 			statuses[result.nodeID] = "success"
@@ -118,6 +129,9 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 		if err := emitSafe(RunEvent{Type: "layer_complete", Layer: layer.Index, Message: layerMessage("completed layer", layer.Nodes)}); err != nil {
 			return err
 		}
+	}
+	if workflowErr != nil {
+		return workflowErr
 	}
 	if firstErr != nil && hasUntoleratedFailure(failed, completedAfterFailure) {
 		return firstErr
@@ -167,6 +181,32 @@ func hasUntoleratedFailure(failed map[string]bool, completedAfterFailure map[str
 		}
 	}
 	return false
+}
+
+func oneSuccessSkipError(node Node, statuses map[string]string, failureReasons map[string]string) error {
+	if node.TriggerRule != "one_success" || len(node.DependsOn) == 0 {
+		return nil
+	}
+	for _, dep := range node.DependsOn {
+		if statuses[dep] == "success" {
+			return nil
+		}
+	}
+	failedDeps := make([]string, 0, len(node.DependsOn))
+	for _, dep := range node.DependsOn {
+		if statuses[dep] == "failed" {
+			reason := failureReasons[dep]
+			if reason == "" {
+				reason = "failed without a recorded reason"
+			}
+			failedDeps = append(failedDeps, dep+": "+reason)
+		}
+	}
+	// Review synthesis must fail loudly when every reviewer failed instead of producing an empty result.
+	if len(failedDeps) > 0 {
+		return fmt.Errorf("skipped %s because trigger_rule one_success had no successful dependencies; failed dependencies: %s", node.ID, stringsJoin(failedDeps))
+	}
+	return fmt.Errorf("skipped %s because trigger_rule one_success had no successful dependencies", node.ID)
 }
 
 type ScheduledLayer struct {
