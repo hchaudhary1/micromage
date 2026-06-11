@@ -2,14 +2,18 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 const validWorkflowYAML = `name: feature-flow
@@ -28,6 +32,8 @@ nodes:
     agent: general
     idle_timeout: 60000
     allowed_tools: []
+    outputs:
+      - $ARTIFACTS_DIR/plan.md
   - id: implement
     command: implement
     depends_on: [plan]
@@ -57,6 +63,9 @@ func TestParseYAMLAcceptsWorkflowMetadata(t *testing.T) {
 	}
 	if workflow.Nodes[0].Context != "fresh" || workflow.Nodes[0].Agent != "general" || workflow.Nodes[0].IdleTimeout == nil || len(workflow.Nodes[0].AllowedTools) != 0 {
 		t.Fatalf("expected opencode runtime metadata, got %#v", workflow.Nodes[0])
+	}
+	if got := strings.Join(workflow.Nodes[0].Outputs, ","); got != "$ARTIFACTS_DIR/plan.md" {
+		t.Fatalf("expected output metadata, got %#v", workflow.Nodes[0].Outputs)
 	}
 }
 
@@ -523,6 +532,243 @@ func TestRealRunnerExpandsOutputsInPromptNodes(t *testing.T) {
 	}
 }
 
+func TestRealRunnerSubstitutesJSONOutputsInBashAndPrompt(t *testing.T) {
+	runner := NewRealRunner(RealRunnerConfig{ArtifactsDir: t.TempDir()})
+	runner.outputs["collect-context"] = `{"context_path":"/tmp/context with spaces.md","summary":"last commit"}`
+
+	prompt := runner.substitutePromptOutputs("Review $collect-context.output.context_path for $collect-context.output.summary.")
+	if prompt != "Review /tmp/context with spaces.md for last commit." {
+		t.Fatalf("unexpected prompt substitution: %q", prompt)
+	}
+
+	script := runner.substituteOutputs(`printf "%s" "$collect-context.output.context_path"`)
+	if script != `printf "%s" "/tmp/context with spaces.md"` {
+		t.Fatalf("unexpected bash substitution: %q", script)
+	}
+}
+
+func TestRealRunnerSubstitutesRawOutputWhenJSONIsMalformed(t *testing.T) {
+	runner := NewRealRunner(RealRunnerConfig{ArtifactsDir: t.TempDir()})
+	runner.outputs["collect-context"] = `{"context_path":`
+
+	got := runner.substitutePromptOutputs("Raw=$collect-context.output Missing=$collect-context.output.context_path")
+	want := `Raw={"context_path": Missing=$collect-context.output.context_path`
+	if got != want {
+		t.Fatalf("unexpected malformed JSON substitution:\nwant %q\n got %q", want, got)
+	}
+}
+
+func TestDefaultArtifactsDirLivesInsideRepo(t *testing.T) {
+	dir := t.TempDir()
+	got := DefaultArtifactsDir(dir, "run-3")
+	want := filepath.Join(dir, ".micromage", "runs", "run-3")
+	if got != want {
+		t.Fatalf("unexpected artifact dir:\nwant %q\n got %q", want, got)
+	}
+}
+
+func TestRealRunnerMaterializesDeclaredOutputFromProviderResponse(t *testing.T) {
+	provider := &captureProvider{}
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-4", "review", "code-review-findings.md")
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    filepath.Join(dir, ".micromage", "runs", "run-4"),
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"$ARTIFACTS_DIR/review/code-review-findings.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err != nil {
+		t.Fatalf("RunNode returned error: %v", err)
+	}
+	data, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("expected materialized artifact: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "captured" || runner.outputs["code-review"] != "captured" {
+		t.Fatalf("expected provider output artifact, got file=%q outputs=%#v", string(data), runner.outputs)
+	}
+}
+
+func TestRealRunnerCapturesDeclaredOutput(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-5", "review", "code-review-findings.md")
+	provider := &captureProvider{writeFiles: map[string]string{artifactPath: "No findings."}}
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    filepath.Join(dir, ".micromage", "runs", "run-5"),
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"$ARTIFACTS_DIR/review/code-review-findings.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err != nil {
+		t.Fatalf("RunNode returned error: %v", err)
+	}
+	if runner.outputs["code-review"] != "No findings." {
+		t.Fatalf("expected artifact content as node output, got %#v", runner.outputs)
+	}
+}
+
+func TestRealRunnerFailsWhenMultipleDeclaredOutputsAreMissing(t *testing.T) {
+	provider := &captureProvider{}
+	dir := t.TempDir()
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    filepath.Join(dir, ".micromage", "runs", "run-6"),
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write findings",
+		Outputs: []string{"$ARTIFACTS_DIR/a.md", "$ARTIFACTS_DIR/b.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err == nil || !strings.Contains(err.Error(), "expected output was not written") {
+		t.Fatalf("expected missing output error, got %v", err)
+	}
+}
+
+func TestRealRunnerHonorsIdleTimeout(t *testing.T) {
+	provider := blockingProvider{}
+	runner := NewRealRunner(RealRunnerConfig{
+		DefaultProvider: "blocking",
+		Providers:       ProviderRegistry{"blocking": provider},
+	})
+	timeout := 25
+
+	start := time.Now()
+	err := runner.RunNode(context.Background(), Node{
+		ID:          "slow-review",
+		Prompt:      "review",
+		IdleTimeout: &timeout,
+	}, func(RunEvent) error { return nil })
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("expected timeout to interrupt provider promptly, took %s", elapsed)
+	}
+}
+
+func TestOpenCodeProviderFailsPermissionAutoReject(t *testing.T) {
+	command := writeExecutable(t, `#!/bin/sh
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"! permission requested: external_directory (/tmp/run/*); auto-rejecting"}}'
+`)
+
+	_, err := (OpenCodeProvider{Command: command}).RunPrompt(context.Background(), PromptRequest{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		Model:  DefaultOpenCodeModel,
+		Node:   Node{ID: "review"},
+	}, func(RunEvent) error { return nil })
+
+	if err == nil || !strings.Contains(err.Error(), "permission auto-rejected") {
+		t.Fatalf("expected permission rejection error, got %v", err)
+	}
+}
+
+func TestOpenCodeProviderFailsEmptyOutput(t *testing.T) {
+	command := writeExecutable(t, `#!/bin/sh
+exit 0
+`)
+
+	_, err := (OpenCodeProvider{Command: command}).RunPrompt(context.Background(), PromptRequest{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		Model:  DefaultOpenCodeModel,
+		Node:   Node{ID: "review"},
+	}, func(RunEvent) error { return nil })
+
+	if err == nil || !strings.Contains(err.Error(), "empty output") {
+		t.Fatalf("expected empty output error, got %v", err)
+	}
+}
+
+func TestOpenCodeProviderSerializesConcurrentRuns(t *testing.T) {
+	lockDir := filepath.Join(t.TempDir(), "opencode-lock")
+	command := writeExecutable(t, `#!/bin/sh
+lock_dir="$MICROMAGE_TEST_LOCK_DIR"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  echo "database is locked" >&2
+  exit 1
+fi
+trap 'rmdir "$lock_dir"' EXIT
+sleep 0.1
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"ok"}}'
+`)
+	t.Setenv("MICROMAGE_TEST_LOCK_DIR", lockDir)
+
+	provider := OpenCodeProvider{Command: command}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := provider.RunPrompt(context.Background(), PromptRequest{
+				Prompt: "review",
+				CWD:    t.TempDir(),
+				Model:  DefaultOpenCodeModel,
+				Node:   Node{ID: "review"},
+			}, func(RunEvent) error { return nil })
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("expected serialized provider calls to succeed, got %v", err)
+		}
+	}
+}
+
+func TestScanOpenCodeAcceptsLongJSONLines(t *testing.T) {
+	longText := strings.Repeat("review finding ", 7000)
+	line := `{"type":"text","part":{"type":"text","text":` + quoteJSON(longText) + `}}`
+	var output strings.Builder
+	errs := make(chan error, 1)
+
+	scanOpenCode(strings.NewReader(line), "review", func(RunEvent) error { return nil }, &output, errs)
+
+	if err := <-errs; err != nil {
+		t.Fatalf("scanOpenCode returned error: %v", err)
+	}
+	if output.String() != longText {
+		t.Fatalf("expected long text output, got length %d", output.Len())
+	}
+}
+
+func TestExtractOpenCodeTextIgnoresToolOutput(t *testing.T) {
+	line := `{"type":"tool_use","part":{"type":"tool","state":{"output":"file contents"},"metadata":{"display":{"text":"preview text"}}}}`
+	if got := extractOpenCodeText(line); got != "" {
+		t.Fatalf("expected tool output to be ignored, got %q", got)
+	}
+}
+
+func TestExtractOpenCodeTextAcceptsAssistantTextEvent(t *testing.T) {
+	line := `{"type":"text","part":{"type":"text","text":"final review"}}`
+	if got := extractOpenCodeText(line); got != "final review" {
+		t.Fatalf("expected assistant text, got %q", got)
+	}
+}
+
 func TestRealRunnerFailsUnsupportedRealNodeKinds(t *testing.T) {
 	runner := NewRealRunner(RealRunnerConfig{})
 	err := runner.RunNode(context.Background(), Node{ID: "approve", Approval: map[string]any{"prompt": "continue?"}}, func(RunEvent) error { return nil })
@@ -602,12 +848,42 @@ func countEvents(events []RunEvent, eventType string) int {
 }
 
 type captureProvider struct {
-	requests []PromptRequest
+	requests   []PromptRequest
+	writeFiles map[string]string
 }
 
 func (provider *captureProvider) RunPrompt(_ context.Context, request PromptRequest, _ EventSink) (string, error) {
 	provider.requests = append(provider.requests, request)
+	for path, content := range provider.writeFiles {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return "", err
+		}
+	}
 	return "captured", nil
+}
+
+type blockingProvider struct{}
+
+func (blockingProvider) RunPrompt(ctx context.Context, _ PromptRequest, _ EventSink) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func writeExecutable(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-opencode")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	return path
+}
+
+func quoteJSON(value string) string {
+	data, _ := json.Marshal(value)
+	return string(data)
 }
 
 func hasNodeEvent(events []RunEvent, eventType string, nodeID string) bool {

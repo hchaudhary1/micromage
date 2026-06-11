@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -137,21 +136,26 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	runner := workflow.NodeRunner(workflow.LoggingRunner{})
 	if mode == "real" {
 		runID := "run-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		runner = workflow.NewRealRunner(workflow.RealRunnerConfig{
-			Commands:        s.commands,
-			CWD:             mustGetwd(),
-			Arguments:       request.Arguments,
-			WorkflowID:      runID,
-			ArtifactsDir:    filepath.Join(os.TempDir(), "micromage-runs", runID),
-			BaseBranch:      os.Getenv("MICROMAGE_BASE_BRANCH"),
-			DefaultProvider: preview.Workflow.Provider,
-			DefaultModel:    preview.Workflow.Model,
-			Unsafe:          os.Getenv("MICROMAGE_OPENCODE_UNSAFE") == "1",
-		})
+		cwd := mustGetwd()
+		runner = workflow.NewRealRunner(realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID))
 	}
 
 	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
 		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
+	}
+}
+
+func realRunnerConfig(commands workflow.CommandRegistry, parsed workflow.Workflow, request yamlRequest, cwd string, runID string) workflow.RealRunnerConfig {
+	return workflow.RealRunnerConfig{
+		Commands:        commands,
+		CWD:             cwd,
+		Arguments:       request.Arguments,
+		WorkflowID:      runID,
+		ArtifactsDir:    workflow.DefaultArtifactsDir(cwd, runID),
+		BaseBranch:      os.Getenv("MICROMAGE_BASE_BRANCH"),
+		DefaultProvider: parsed.Provider,
+		DefaultModel:    parsed.Model,
+		Unsafe:          os.Getenv("MICROMAGE_OPENCODE_UNSAFE") == "1",
 	}
 }
 

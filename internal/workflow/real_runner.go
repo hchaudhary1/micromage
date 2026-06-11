@@ -13,9 +13,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const DefaultOpenCodeModel = "opencode/nemotron-3-ultra-free"
+const maxOpenCodeTokenSize = 8 * 1024 * 1024
+
+var openCodeMu sync.Mutex
 
 type PromptRequest struct {
 	Prompt       string
@@ -71,7 +75,7 @@ func NewRealRunner(config RealRunnerConfig) *RealRunner {
 	}
 	artifactsDir := config.ArtifactsDir
 	if artifactsDir == "" {
-		artifactsDir = filepath.Join(os.TempDir(), "micromage-runs", config.WorkflowID)
+		artifactsDir = DefaultArtifactsDir(cwd, config.WorkflowID)
 	}
 	return &RealRunner{
 		commands:        config.Commands,
@@ -87,9 +91,24 @@ func NewRealRunner(config RealRunnerConfig) *RealRunner {
 	}
 }
 
+func DefaultArtifactsDir(cwd string, workflowID string) string {
+	if workflowID == "" {
+		workflowID = "run"
+	}
+	// Agent-readable artifacts live under the repo so CLI providers can access them.
+	return filepath.Join(cwd, ".micromage", "runs", workflowID)
+}
+
 func (runner *RealRunner) RunNode(ctx context.Context, node Node, emit EventSink) error {
 	if err := os.MkdirAll(runner.artifactsDir, 0o755); err != nil {
 		return err
+	}
+	if node.Kind() == "bash" {
+		if timeout := nodeTimeout(node); timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 	}
 	switch node.Kind() {
 	case "prompt":
@@ -124,6 +143,13 @@ func (runner *RealRunner) runAI(ctx context.Context, node Node, prompt string, e
 	if !ok {
 		return fmt.Errorf("provider %s was not registered", providerName)
 	}
+	if !providerAppliesNodeTimeout(provider) {
+		if timeout := nodeTimeout(node); timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+	}
 	model := node.Model
 	if model == "" {
 		model = runner.defaultModel
@@ -141,9 +167,33 @@ func (runner *RealRunner) runAI(ctx context.Context, node Node, prompt string, e
 		ArtifactsDir: runner.artifactsDir,
 	}, emit)
 	if err == nil {
+		if artifactOutput, artifactErr := runner.collectExpectedOutputs(node, output); artifactErr != nil {
+			return artifactErr
+		} else if artifactOutput != "" {
+			output = artifactOutput
+		}
 		runner.setOutput(node.ID, output)
 	}
 	return err
+}
+
+func providerAppliesNodeTimeout(provider AIProvider) bool {
+	switch provider.(type) {
+	case OpenCodeProvider, *OpenCodeProvider:
+		return true
+	default:
+		return false
+	}
+}
+
+func nodeTimeout(node Node) time.Duration {
+	if node.IdleTimeout != nil && *node.IdleTimeout > 0 {
+		return time.Duration(*node.IdleTimeout) * time.Millisecond
+	}
+	if node.Timeout != nil && *node.Timeout > 0 {
+		return time.Duration(*node.Timeout) * time.Second
+	}
+	return 0
 }
 
 func (runner *RealRunner) runBash(ctx context.Context, node Node, emit EventSink) (string, error) {
@@ -232,12 +282,76 @@ func (runner *RealRunner) substituteOutputsWith(text string, formatValue func(st
 				return len(keys[i]) > len(keys[j])
 			})
 			for _, key := range keys {
-				text = strings.ReplaceAll(text, "$"+id+".output."+key, formatValue(fmt.Sprint(object[key])))
+				text = replaceOutputToken(text, "$"+id+".output."+key, formatValue(fmt.Sprint(object[key])), false)
 			}
 		}
-		text = strings.ReplaceAll(text, "$"+id+".output", formatValue(output))
+		text = replaceOutputToken(text, "$"+id+".output", formatValue(output), true)
 	}
 	return text
+}
+
+func replaceOutputToken(text string, token string, value string, protectNested bool) string {
+	var builder strings.Builder
+	for {
+		index := strings.Index(text, token)
+		if index < 0 {
+			builder.WriteString(text)
+			return builder.String()
+		}
+		builder.WriteString(text[:index])
+		after := index + len(token)
+		if after < len(text) && isOutputTokenChar(rune(text[after]), protectNested) {
+			builder.WriteString(token)
+			text = text[after:]
+			continue
+		}
+		builder.WriteString(value)
+		text = text[after:]
+	}
+}
+
+func isOutputTokenChar(char rune, protectNested bool) bool {
+	if protectNested && char == '.' {
+		return true
+	}
+	return char == '_' || char == '-' || (char >= '0' && char <= '9') || (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z')
+}
+
+func (runner *RealRunner) collectExpectedOutputs(node Node, providerOutput string) (string, error) {
+	var collected []string
+	paths := make([]string, 0, len(node.Outputs))
+	for _, pattern := range node.Outputs {
+		paths = append(paths, runner.resolveOutputPath(pattern))
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if len(paths) == 1 && strings.TrimSpace(providerOutput) != "" {
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						return "", err
+					}
+					if err := os.WriteFile(path, []byte(strings.TrimSpace(providerOutput)+"\n"), 0o644); err != nil {
+						return "", err
+					}
+					collected = append(collected, strings.TrimSpace(providerOutput))
+					continue
+				}
+				return "", fmt.Errorf("node %s expected output was not written: %s", node.ID, path)
+			}
+			return "", err
+		}
+		collected = append(collected, strings.TrimSpace(string(data)))
+	}
+	return strings.Join(collected, "\n\n"), nil
+}
+
+func (runner *RealRunner) resolveOutputPath(pattern string) string {
+	path := runner.expandPrompt(pattern)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(runner.cwd, path)
+	}
+	return path
 }
 
 func (runner *RealRunner) setOutput(id string, output string) {
@@ -271,6 +385,14 @@ func BuildOpenCodeArgs(model string, cwd string, prompt string, unsafe bool) []s
 }
 
 func (provider OpenCodeProvider) RunPrompt(ctx context.Context, request PromptRequest, emit EventSink) (string, error) {
+	openCodeMu.Lock()
+	defer openCodeMu.Unlock()
+	if timeout := nodeTimeout(request.Node); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
 	command := provider.Command
 	if command == "" {
 		command = "opencode"
@@ -303,11 +425,19 @@ func (provider OpenCodeProvider) RunPrompt(ctx context.Context, request PromptRe
 	if err := cmd.Wait(); err != nil {
 		return output.String(), err
 	}
-	return strings.TrimSpace(output.String()), nil
+	result := strings.TrimSpace(output.String())
+	if strings.Contains(result, "permission requested:") && strings.Contains(result, "auto-rejecting") {
+		return result, fmt.Errorf("opencode permission auto-rejected for node %s", request.Node.ID)
+	}
+	if result == "" {
+		return "", fmt.Errorf("opencode returned empty output for node %s", request.Node.ID)
+	}
+	return result, nil
 }
 
 func scanOpenCode(stream io.Reader, nodeID string, emit EventSink, output *strings.Builder, errs chan<- error) {
 	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 64*1024), maxOpenCodeTokenSize)
 	for scanner.Scan() {
 		text := extractOpenCodeText(scanner.Text())
 		if text == "" {
@@ -324,6 +454,7 @@ func scanOpenCode(stream io.Reader, nodeID string, emit EventSink, output *strin
 
 func scanPlain(stream io.Reader, nodeID string, emit EventSink, errs chan<- error) {
 	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 64*1024), maxOpenCodeTokenSize)
 	for scanner.Scan() {
 		text := strings.TrimSpace(scanner.Text())
 		if text == "" {
@@ -338,37 +469,20 @@ func scanPlain(stream io.Reader, nodeID string, emit EventSink, errs chan<- erro
 }
 
 func extractOpenCodeText(line string) string {
-	var payload any
+	var payload struct {
+		Type string `json:"type"`
+		Part struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"part"`
+	}
 	if err := json.Unmarshal([]byte(line), &payload); err != nil {
 		return line
 	}
-	if text, ok := findText(payload); ok {
-		return text
+	if payload.Type == "text" && payload.Part.Type == "text" {
+		return payload.Part.Text
 	}
 	return ""
-}
-
-func findText(value any) (string, bool) {
-	switch typed := value.(type) {
-	case map[string]any:
-		for _, key := range []string{"delta", "text", "content"} {
-			if text, ok := typed[key].(string); ok && text != "" {
-				return text, true
-			}
-		}
-		for _, child := range typed {
-			if text, ok := findText(child); ok {
-				return text, true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if text, ok := findText(child); ok {
-				return text, true
-			}
-		}
-	}
-	return "", false
 }
 
 func envName(value string) string {

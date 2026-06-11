@@ -18,5 +18,8 @@ Thumbs.db
 coverage.out
 coverage.*
 
+# Keep local workflow run artifacts out of source history.
+.micromage/
+
 # Ignore the default binary name if someone runs `go build ./cmd/server` locally.
 /server

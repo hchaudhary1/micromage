@@ -92,6 +92,7 @@ internal/web/                  HTTP handlers and tests
 - Streams a simulated run over Server-Sent Events by default
 - Supports guarded real runs for `prompt`, `command`, and `bash` nodes through the OpenCode CLI
 - Substitutes `$ARGUMENTS`, `$WORKFLOW_ID`, `$ARTIFACTS_DIR`, and `$node.output` references into real AI prompts
+- Stores real-run artifacts under `.micromage/runs/<run-id>` so local CLI agents can read and write phase evidence
 - Does not execute scripts, hooks, MCP, skills, approvals, or worktrees yet
 
 ## Real Runs

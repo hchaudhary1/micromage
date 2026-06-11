@@ -56,6 +56,7 @@ type Node struct {
 	Skills       []string       `json:"skills,omitempty"`
 	IdleTimeout  *int           `json:"idle_timeout,omitempty"`
 	AllowedTools []string       `json:"allowed_tools,omitempty"`
+	Outputs      []string       `json:"outputs,omitempty"`
 	Extra        map[string]any `json:"extra,omitempty"`
 	fields       map[string]bool
 	typeIssues   []Issue
@@ -135,6 +136,7 @@ func (n *Node) UnmarshalYAML(value *yaml.Node) error {
 		Skills       []string       `yaml:"skills"`
 		IdleTimeout  *int           `yaml:"idle_timeout"`
 		AllowedTools []string       `yaml:"allowed_tools"`
+		Outputs      []string       `yaml:"outputs"`
 	}
 
 	var raw rawNode
@@ -174,7 +176,8 @@ func (n *Node) UnmarshalYAML(value *yaml.Node) error {
 	n.Skills = trimStrings(raw.Skills)
 	n.IdleTimeout = raw.IdleTimeout
 	n.AllowedTools = trimStrings(raw.AllowedTools)
-	n.Extra = removeKeys(extra, "id", "depends_on", "when", "trigger_rule", "provider", "model", "context", "agent", "command", "prompt", "bash", "script", "loop", "approval", "cancel", "timeout", "retry", "hooks", "mcp", "skills", "idle_timeout", "allowed_tools")
+	n.Outputs = trimStrings(raw.Outputs)
+	n.Extra = removeKeys(extra, "id", "depends_on", "when", "trigger_rule", "provider", "model", "context", "agent", "command", "prompt", "bash", "script", "loop", "approval", "cancel", "timeout", "retry", "hooks", "mcp", "skills", "idle_timeout", "allowed_tools", "outputs")
 	n.fields = fields
 	return nil
 }

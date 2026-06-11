@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -116,6 +117,32 @@ func TestReviewLastCommitTemplatePreviewsWithParallelReviewNodes(t *testing.T) {
 	}
 	if reviewTemplate.YAML == "" {
 		t.Fatal("review-last-commit template not found")
+	}
+	parsed, issues := workflow.ParseYAML(reviewTemplate.YAML)
+	if workflow.HasErrors(issues) {
+		t.Fatalf("expected valid review-last-commit template, got %#v", issues)
+	}
+	declaredOutputs := map[string]string{
+		"code-review":     "$ARTIFACTS_DIR/review-last-commit/code-review-findings.md",
+		"error-handling":  "$ARTIFACTS_DIR/review-last-commit/error-handling-findings.md",
+		"test-coverage":   "$ARTIFACTS_DIR/review-last-commit/test-coverage-findings.md",
+		"comment-quality": "$ARTIFACTS_DIR/review-last-commit/comment-quality-findings.md",
+		"docs-impact":     "$ARTIFACTS_DIR/review-last-commit/docs-impact-findings.md",
+		"synthesize":      "$ARTIFACTS_DIR/review-last-commit/consolidated-review.md",
+	}
+	for _, node := range parsed.Nodes {
+		if want, ok := declaredOutputs[node.ID]; ok {
+			if len(node.Outputs) != 1 || node.Outputs[0] != want {
+				t.Fatalf("expected %s to declare %q, got %#v", node.ID, want, node.Outputs)
+			}
+			delete(declaredOutputs, node.ID)
+		}
+		if node.ID == "collect-context" && !strings.Contains(node.Bash, "git rev-parse --verify HEAD") {
+			t.Fatalf("expected collect-context to handle missing HEAD, got %q", node.Bash)
+		}
+	}
+	if len(declaredOutputs) > 0 {
+		t.Fatalf("missing declared outputs for nodes: %#v", declaredOutputs)
 	}
 
 	response := postJSON(server, "/api/preview", `{"yaml": `+strconvQuote(reviewTemplate.YAML)+`}`)
@@ -269,6 +296,18 @@ func TestRunEndpointRejectsInvalidJSON(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", response.Code)
+	}
+}
+
+func TestRealRunnerConfigUsesRepoLocalArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	config := realRunnerConfig(workflow.CommandRegistry{}, workflow.Workflow{Provider: "opencode", Model: "model"}, yamlRequest{Arguments: "review"}, dir, "run-1")
+
+	if config.ArtifactsDir != filepath.Join(dir, ".micromage", "runs", "run-1") {
+		t.Fatalf("expected repo-local artifacts dir, got %q", config.ArtifactsDir)
+	}
+	if config.CWD != dir || config.Arguments != "review" || config.DefaultProvider != "opencode" || config.DefaultModel != "model" {
+		t.Fatalf("unexpected real runner config: %#v", config)
 	}
 }
 
