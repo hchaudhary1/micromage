@@ -236,6 +236,27 @@ func TestRunHistoryAPIsExposeRunsManifestAndSummary(t *testing.T) {
 	}
 }
 
+func TestVersionEndpointReturnsBuildMetadata(t *testing.T) {
+	server := newTestServer(t).(*Server)
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("expected JSON version response, got %q", contentType)
+	}
+	var info BuildInfo
+	if err := json.NewDecoder(response.Body).Decode(&info); err != nil {
+		t.Fatalf("decode version response: %v", err)
+	}
+	if info.Version != "test-version" || info.Commit != "test-commit" || info.BuildDate != "test-date" {
+		t.Fatalf("unexpected build metadata: %#v", info)
+	}
+}
+
 func TestCleanupPreviewEndpointReportsCandidates(t *testing.T) {
 	server := newTestServer(t).(*Server)
 	dir := t.TempDir()
@@ -1174,7 +1195,11 @@ func newTestServer(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("test assets unavailable: %v", err)
 	}
-	server, err := NewServer(assets)
+	server, err := NewServer(assets, BuildInfo{
+		Version:   "test-version",
+		Commit:    "test-commit",
+		BuildDate: "test-date",
+	})
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}

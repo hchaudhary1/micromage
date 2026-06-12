@@ -1,6 +1,6 @@
 # Release And Deployment Guide
 
-Micromage currently ships as a single Go server binary with embedded HTML, JavaScript, CSS, workflow templates, and command prompts. There is no Docker image, package registry, or release automation yet; this guide defines the initial manual release path.
+Micromage ships as a single Go server binary with embedded HTML, JavaScript, CSS, workflow templates, and command prompts. We support both manual release validation and an automated GitHub Actions release workflow for tagged builds.
 
 ## Prerequisites
 
@@ -39,7 +39,13 @@ Build the host platform binary:
 
 ```sh
 mkdir -p dist
-go build -trimpath -ldflags="-s -w" -o dist/micromage ./cmd/server
+GO_BUILD_VERSION="development"
+GO_BUILD_COMMIT="development"
+GO_BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+go build \
+  -trimpath \
+  -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" \
+  -o dist/micromage ./cmd/server
 ```
 
 Run it:
@@ -50,6 +56,45 @@ MICROMAGE_HOST=127.0.0.1 MICROMAGE_PORT=8080 ./dist/micromage
 
 The binary contains the embedded web assets from `cmd/server/web`, so deployment does not require copying static files separately.
 
+## Release Automation
+
+The repo includes a release workflow that builds and packages versioned artifacts for Linux, macOS, and Windows on release tags (or via manual dispatch).
+
+### Triggering a Release
+
+1. Tag a reviewed commit and push:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+2. Or run `Release` workflow dispatch with a `version` (for example, `v0.2.0`).
+
+Artifacts include:
+
+- `micromage-<version>-linux-amd64.tar.gz`
+- `micromage-<version>-linux-arm64.tar.gz`
+- `micromage-<version>-darwin-amd64.tar.gz`
+- `micromage-<version>-darwin-arm64.tar.gz`
+- `micromage-<version>-windows-amd64.zip`
+- `SHA256SUMS`
+
+Each package includes:
+
+- Embedded `micromage` binary
+- `LICENSE`
+- `README.md`
+- `docs/operator-security.md`
+- `docs/release.md`
+
+### Verify version metadata
+
+```sh
+./dist/micromage --version
+curl http://127.0.0.1:8080/api/version
+```
+
 ## Build Release Packages
 
 Build common release targets from a reviewed commit:
@@ -57,11 +102,14 @@ Build common release targets from a reviewed commit:
 ```sh
 mkdir -p dist
 
-GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/micromage-linux-amd64 ./cmd/server
-GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/micromage-linux-arm64 ./cmd/server
-GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/micromage-darwin-arm64 ./cmd/server
-GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/micromage-darwin-amd64 ./cmd/server
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/micromage-windows-amd64.exe ./cmd/server
+GO_BUILD_VERSION="development"
+GO_BUILD_COMMIT="development"
+GO_BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" -o dist/micromage-linux-amd64 ./cmd/server
+GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" -o dist/micromage-linux-arm64 ./cmd/server
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" -o dist/micromage-darwin-arm64 ./cmd/server
+GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" -o dist/micromage-darwin-amd64 ./cmd/server
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X \"main.buildVersion=${GO_BUILD_VERSION}\" -X \"main.buildCommit=${GO_BUILD_COMMIT}\" -X \"main.buildDate=${GO_BUILD_DATE}\"" -o dist/micromage-windows-amd64.exe ./cmd/server
 ```
 
 Package each binary with the license and operator docs:
@@ -190,7 +238,7 @@ Common environment variables:
 
 ## Release Limitations
 
-- Releases are manually built and attached until a dedicated release workflow exists.
-- The binary has no embedded version flag yet; record the Git tag and commit SHA with each package.
+- A dedicated release workflow now builds and attaches tagged artifacts.
+- The binary exposes embedded build metadata through `--version` and `/api/version`.
 - Real-run safety depends on operator environment controls, workflow review, and local tool credentials.
 - Durable run history is still evolving; `.micromage/` should be treated as private local state and backed up only when needed.

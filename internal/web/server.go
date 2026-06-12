@@ -29,6 +29,7 @@ type Server struct {
 	templates         *template.Template
 	workflowTemplates []workflow.Template
 	commands          workflow.CommandRegistry
+	buildInfo         BuildInfo
 	mux               *http.ServeMux
 	workingDirectory  func() string
 	nextRunID         func() string
@@ -37,7 +38,7 @@ type Server struct {
 	logOutput         io.Writer
 }
 
-func NewServer(assets fs.FS) (*Server, error) {
+func NewServer(assets fs.FS, buildInfo BuildInfo) (*Server, error) {
 	templates, err := template.ParseFS(assets, "web/templates/*.html")
 	if err != nil {
 		return nil, err
@@ -61,6 +62,7 @@ func NewServer(assets fs.FS) (*Server, error) {
 		templates:         templates,
 		workflowTemplates: workflowTemplates,
 		commands:          workflow.NewCommandRegistry(commands),
+		buildInfo:         buildInfo,
 		mux:               http.NewServeMux(),
 		workingDirectory:  mustGetwd,
 		nextRunID:         func() string { return "run-" + strconv.FormatInt(time.Now().UnixNano(), 10) },
@@ -72,6 +74,7 @@ func NewServer(assets fs.FS) (*Server, error) {
 	server.mux.HandleFunc("GET /", server.handleShell)
 	server.mux.HandleFunc("GET /healthz", server.handleHealthz)
 	server.mux.HandleFunc("GET /readyz", server.handleReadyz)
+	server.mux.HandleFunc("GET /api/version", server.handleVersion)
 	server.mux.HandleFunc("GET /api/templates", server.handleTemplates)
 	server.mux.HandleFunc("POST /api/definitions", server.handleSaveDefinition)
 	server.mux.HandleFunc("GET /api/runs", server.handleRuns)
@@ -114,6 +117,11 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	if err := s.templates.ExecuteTemplate(w, "index.html", data); err != nil {
 		http.Error(w, "could not render workflow shell", http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	// Version metadata helps operators verify exactly which artifact is deployed.
+	writeJSON(w, http.StatusOK, s.buildInfo)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +462,12 @@ type yamlRequest struct {
 	YAML      string `json:"yaml"`
 	Arguments string `json:"arguments"`
 	Mode      string `json:"mode"`
+}
+
+type BuildInfo struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuildDate string `json:"build_date"`
 }
 
 type definitionSaveRequest struct {

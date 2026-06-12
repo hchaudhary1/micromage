@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +31,12 @@ const (
 	defaultShutdownTimeout   = 10 * time.Second
 )
 
+var (
+	buildVersion = "development"
+	buildCommit  = "unknown"
+	buildDate    = "unknown"
+)
+
 type serverConfig struct {
 	Host              string
 	Port              string
@@ -39,7 +48,24 @@ type serverConfig struct {
 }
 
 func main() {
-	server, err := web.NewServer(assets)
+	showVersion := flag.Bool("version", false, "print build metadata and exit")
+	flag.Parse()
+
+	serverMetadata := web.BuildInfo{
+		Version:   buildVersion,
+		Commit:    buildCommit,
+		BuildDate: buildDate,
+	}
+	if *showVersion {
+		payload, err := json.MarshalIndent(serverMetadata, "", "  ")
+		if err != nil {
+			log.Fatalf("encode build metadata: %v", err)
+		}
+		fmt.Printf("%s\n", string(payload))
+		return
+	}
+
+	server, err := web.NewServer(assets, serverMetadata)
 	if err != nil {
 		log.Fatalf("create server: %v", err)
 	}
