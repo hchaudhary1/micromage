@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -167,6 +168,39 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
+
+	runID := s.nextRunID()
+	cwd := s.workingDirectory()
+	artifactsDir := workflow.DefaultArtifactsDir(cwd, runID)
+	logRunID := ""
+	runner := workflow.NodeRunner(workflow.LoggingRunner{})
+	var summary *realRunSummary
+	lifecycle := newRealRunSummary(preview.Workflow, cwd, artifactsDir, runID)
+	runStore := workflow.NewRunStore(cwd)
+	if mode == "real" {
+		logRunID = runID
+		config := realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID)
+		artifactsDir = config.ArtifactsDir
+		lifecycle = newRealRunSummary(preview.Workflow, cwd, config.ArtifactsDir, runID)
+		summary = lifecycle
+		runner = workflow.NewRealRunner(config)
+	}
+	// Persisting before execution makes run history survive stream loss or node failure.
+	if _, err := runStore.StartRun(workflow.RunStart{
+		RunID:             runID,
+		WorkflowID:        workflowIDForRun(preview.Workflow, runID),
+		WorkflowName:      preview.Workflow.Name,
+		Mode:              mode,
+		CWD:               cwd,
+		ArtifactsDir:      artifactsDir,
+		ArgumentsRedacted: request.Arguments != "",
+		NodeTotal:         len(preview.Workflow.Nodes),
+	}); err != nil {
+		s.logJSON(map[string]any{"event": "run_store_start_failed", "run_id": runID, "error": publicFailureReason(err)})
+		http.Error(w, "could not persist run metadata", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -186,37 +220,77 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
-	runner := workflow.NodeRunner(workflow.LoggingRunner{})
-	var summary *realRunSummary
-	runID := ""
-	if mode == "real" {
-		runID = s.nextRunID()
-		cwd := s.workingDirectory()
-		config := realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID)
-		summary = newRealRunSummary(preview.Workflow, cwd, config.ArtifactsDir, runID)
-		runner = workflow.NewRealRunner(config)
-	}
-
-	if summary != nil {
-		emitRaw := emit
-		emit = func(event workflow.RunEvent) error {
-			summary.observe(event)
-			return emitRaw(event)
-		}
+	emitRaw := emit
+	emit = func(event workflow.RunEvent) error {
+		lifecycle.observe(event)
+		return emitRaw(event)
 	}
 
 	runStarted := time.Now()
-	s.logWorkflowStart(mode, runID)
+	s.logWorkflowStart(mode, logRunID)
 	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
-		s.logWorkflowFinish("workflow_failed", mode, runID, "failed", runStarted, publicFailureReason(err))
-		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
+		if errors.Is(err, context.Canceled) {
+			s.logWorkflowFinish("workflow_interrupted", mode, logRunID, "interrupted", runStarted, publicFailureReason(err))
+			s.persistRunInterruption(runStore, runID, publicFailureReason(err))
+			_ = emit(workflow.RunEvent{Type: "workflow_interrupted", Message: err.Error()})
+		} else {
+			s.logWorkflowFinish("workflow_failed", mode, logRunID, "failed", runStarted, publicFailureReason(err))
+			s.persistRunFailure(runStore, runID, lifecycle, publicFailureReason(err))
+			_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
+		}
 	} else {
-		s.logWorkflowFinish("workflow_complete", mode, runID, "success", runStarted, "")
+		s.logWorkflowFinish("workflow_complete", mode, logRunID, "success", runStarted, "")
+		s.persistRunFinish(runStore, runID, lifecycle)
 	}
 	if summary != nil {
 		// Real-run summaries keep artifact evidence visible without shell inspection.
 		_ = emit(summary.event())
 	}
+}
+
+func (s *Server) persistRunFinish(store *workflow.RunStore, runID string, summary *realRunSummary) {
+	if store == nil {
+		return
+	}
+	if err := store.FinishRun(runID, runResultFromSummary(summary, "")); err != nil {
+		s.logJSON(map[string]any{"event": "run_store_finish_failed", "run_id": runID, "error": publicFailureReason(err)})
+	}
+}
+
+func (s *Server) persistRunFailure(store *workflow.RunStore, runID string, summary *realRunSummary, reason string) {
+	if store == nil {
+		return
+	}
+	if err := store.FailRun(runID, runResultFromSummary(summary, reason)); err != nil {
+		s.logJSON(map[string]any{"event": "run_store_finish_failed", "run_id": runID, "error": publicFailureReason(err)})
+	}
+}
+
+func (s *Server) persistRunInterruption(store *workflow.RunStore, runID string, reason string) {
+	if store == nil {
+		return
+	}
+	if err := store.InterruptRun(runID, reason); err != nil {
+		s.logJSON(map[string]any{"event": "run_store_finish_failed", "run_id": runID, "error": publicFailureReason(err)})
+	}
+}
+
+func runResultFromSummary(summary *realRunSummary, reason string) workflow.RunResult {
+	result := workflow.RunResult{FailureReason: reason}
+	if summary == nil {
+		return result
+	}
+	result.CompletedNodes = append([]string(nil), summary.completed...)
+	result.FailedNodes = append([]workflow.RunFailure(nil), summary.failures...)
+	result.SkippedNodes = append([]string(nil), summary.skipped...)
+	return result
+}
+
+func workflowIDForRun(parsed workflow.Workflow, fallback string) string {
+	if parsed.Name != "" {
+		return parsed.Name
+	}
+	return fallback
 }
 
 func (s *Server) previewForRequest(request yamlRequest) workflow.Preview {
@@ -500,6 +574,7 @@ type realRunSummary struct {
 	runID        string
 	completed    []string
 	failures     []workflow.RunFailure
+	skipped      []string
 }
 
 func newRealRunSummary(parsed workflow.Workflow, cwd string, artifactsDir string, runID string) *realRunSummary {
@@ -517,6 +592,8 @@ func (summary *realRunSummary) observe(event workflow.RunEvent) {
 		summary.completed = append(summary.completed, event.NodeID)
 	case "node_failed":
 		summary.failures = append(summary.failures, workflow.RunFailure{NodeID: event.NodeID, Message: event.Message})
+	case "node_skipped":
+		summary.skipped = append(summary.skipped, event.NodeID)
 	}
 }
 

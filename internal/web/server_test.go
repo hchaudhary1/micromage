@@ -335,7 +335,10 @@ func TestPreviewEndpointRejectsOversizedRequestBodies(t *testing.T) {
 }
 
 func TestRunEndpointStreamsFakeEvents(t *testing.T) {
-	server := newTestServer(t)
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	server.nextRunID = func() string { return "run-simulated" }
 
 	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n", "mode": "simulate", "arguments": "feature input"}`)
 
@@ -361,6 +364,17 @@ func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 		if !strings.Contains(body, frame) {
 			t.Fatalf("expected SSE frame %q in %q", frame, body)
 		}
+	}
+
+	index := readDurableRunIndex(t, dir)
+	if len(index.Runs) != 1 || index.Runs[0].RunID != "run-simulated" || index.Runs[0].Status != "succeeded" {
+		t.Fatalf("unexpected durable simulated run index: %#v", index)
+	}
+	if index.Runs[0].WorkflowID != "test" {
+		t.Fatalf("expected workflow name to identify unsaved workflow, got %#v", index.Runs[0])
+	}
+	if index.Runs[0].NodeCounts.Total != 1 || index.Runs[0].NodeCounts.Completed != 1 || index.Runs[0].NodeCounts.Failed != 0 {
+		t.Fatalf("unexpected durable simulated node counts: %#v", index.Runs[0].NodeCounts)
 	}
 }
 
@@ -752,6 +766,9 @@ nodes:
       - $ARTIFACTS_DIR/review/finding.md
   - id: fail-review
     bash: exit 7
+  - id: skipped-after-failure
+    bash: printf skipped
+    depends_on: [fail-review]
 `
 
 	response := postJSONWithOptions(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, requestOptions{
@@ -780,6 +797,24 @@ nodes:
 	}
 	if _, ok := findRunEvent(events, "workflow_failed"); !ok {
 		t.Fatalf("expected workflow_failed event, got %#v", events)
+	}
+
+	index := readDurableRunIndex(t, dir)
+	if len(index.Runs) != 1 || index.Runs[0].RunID != "run-summary" || index.Runs[0].Status != "failed" {
+		t.Fatalf("unexpected durable run index: %#v", index)
+	}
+	if index.Runs[0].WorkflowID != "real-summary" || index.Runs[0].WorkflowName != "real-summary" || index.Runs[0].ArtifactsDir != filepath.Join(".micromage", "runs", "run-summary") {
+		t.Fatalf("unexpected durable run metadata: %#v", index.Runs[0])
+	}
+	if index.Runs[0].NodeCounts.Total != 3 || index.Runs[0].NodeCounts.Completed != 1 || index.Runs[0].NodeCounts.Failed != 1 || index.Runs[0].NodeCounts.Skipped != 1 {
+		t.Fatalf("unexpected durable node counts: %#v", index.Runs[0].NodeCounts)
+	}
+	eventsData, err := os.ReadFile(filepath.Join(dir, ".micromage", "runs", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("expected durable run events: %v", err)
+	}
+	if !strings.Contains(string(eventsData), `"type":"run_started"`) || !strings.Contains(string(eventsData), `"type":"run_failed"`) {
+		t.Fatalf("expected durable lifecycle events, got %q", string(eventsData))
 	}
 }
 
@@ -836,7 +871,50 @@ func newTestServer(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("NewServer returned error: %v", err)
 	}
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
 	return server
+}
+
+func readDurableRunIndex(t *testing.T, dir string) struct {
+	Runs []struct {
+		RunID        string `json:"run_id"`
+		WorkflowID   string `json:"workflow_id"`
+		WorkflowName string `json:"workflow_name"`
+		Status       string `json:"status"`
+		ArtifactsDir string `json:"artifacts_dir"`
+		NodeCounts   struct {
+			Total     int `json:"total"`
+			Completed int `json:"completed"`
+			Failed    int `json:"failed"`
+			Skipped   int `json:"skipped"`
+		} `json:"node_counts"`
+	} `json:"runs"`
+} {
+	t.Helper()
+	indexData, err := os.ReadFile(filepath.Join(dir, ".micromage", "runs", "index.json"))
+	if err != nil {
+		t.Fatalf("expected durable run index: %v", err)
+	}
+	var index struct {
+		Runs []struct {
+			RunID        string `json:"run_id"`
+			WorkflowID   string `json:"workflow_id"`
+			WorkflowName string `json:"workflow_name"`
+			Status       string `json:"status"`
+			ArtifactsDir string `json:"artifacts_dir"`
+			NodeCounts   struct {
+				Total     int `json:"total"`
+				Completed int `json:"completed"`
+				Failed    int `json:"failed"`
+				Skipped   int `json:"skipped"`
+			} `json:"node_counts"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		t.Fatalf("decode durable run index: %v", err)
+	}
+	return index
 }
 
 type requestOptions struct {
