@@ -6,6 +6,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const nodeIDPattern = "[A-Za-z0-9][A-Za-z0-9_-]*"
+
 func ParseYAML(input string) (Workflow, []Issue) {
 	var workflow Workflow
 	if strings.TrimSpace(input) == "" {
@@ -31,14 +33,25 @@ func Validate(workflow Workflow) []Issue {
 	}
 
 	seen := map[string]bool{}
+	normalizedEnvIDs := map[string]string{}
 	for _, node := range workflow.Nodes {
 		issues = append(issues, node.typeIssues...)
 		if node.ID == "" {
 			issues = append(issues, Issue{Level: IssueError, Field: "id", Message: "node id is required"})
 			continue
 		}
+		if !validNodeID(node.ID) {
+			issues = append(issues, Issue{Level: IssueError, NodeID: node.ID, Field: "id", Message: "node id must match " + nodeIDPattern})
+		}
 		if seen[node.ID] {
 			issues = append(issues, Issue{Level: IssueError, NodeID: node.ID, Field: "id", Message: "duplicate node id"})
+		}
+		normalizedID := envName(node.ID)
+		if existingID, ok := normalizedEnvIDs[normalizedID]; ok && existingID != node.ID {
+			// Output env names must stay one-to-one so bash nodes read the intended result.
+			issues = append(issues, Issue{Level: IssueError, NodeID: node.ID, Field: "id", Message: "node id collides with node id " + existingID + " after output environment normalization"})
+		} else if !ok {
+			normalizedEnvIDs[normalizedID] = node.ID
 		}
 		seen[node.ID] = true
 	}
@@ -63,6 +76,22 @@ func Validate(workflow Workflow) []Issue {
 		issues = append(issues, Issue{Level: IssueWarning, Field: "runtime", Message: "runtime fields are displayed but not executed in v1"})
 	}
 	return issues
+}
+
+func validNodeID(id string) bool {
+	if id == "" || !isASCIILetterOrDigit(id[0]) {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		if !isASCIILetterOrDigit(id[i]) && id[i] != '_' && id[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetterOrDigit(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
 }
 
 func validateNode(node Node) []Issue {

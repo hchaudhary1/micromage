@@ -90,6 +90,86 @@ func TestParseYAMLReportsEmptyAndMalformedYAML(t *testing.T) {
 	}
 }
 
+func TestParseYAMLValidatesSafeNodeIDs(t *testing.T) {
+	cases := []struct {
+		name    string
+		nodeID  string
+		message string
+	}{
+		{name: "space", nodeID: "bad id", message: "node id must match"},
+		{name: "dot", nodeID: "bad.id", message: "node id must match"},
+		{name: "slash", nodeID: "bad/id", message: "node id must match"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `name: invalid-id
+description: invalid id
+nodes:
+  - id: ` + tc.nodeID + `
+    prompt: hi
+`
+			_, issues := ParseYAML(input)
+
+			if !containsNodeIssue(issues, tc.nodeID, "id", tc.message) {
+				t.Fatalf("expected node id issue for %q, got %#v", tc.nodeID, issues)
+			}
+		})
+	}
+}
+
+func TestParseYAMLRejectsNormalizedOutputEnvironmentCollisions(t *testing.T) {
+	cases := []struct {
+		name       string
+		firstID    string
+		secondID   string
+		wantSecond string
+		wantFirst  string
+	}{
+		{name: "hyphen underscore", firstID: "foo-bar", secondID: "foo_bar", wantSecond: "foo_bar", wantFirst: "foo-bar"},
+		{name: "case", firstID: "Foo", secondID: "foo", wantSecond: "foo", wantFirst: "Foo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `name: env-collision
+description: env collision
+nodes:
+  - id: ` + tc.firstID + `
+    prompt: first
+  - id: ` + tc.secondID + `
+    prompt: second
+`
+			_, issues := ParseYAML(input)
+
+			if !containsNodeIssue(issues, tc.wantSecond, "id", "collides with node id "+tc.wantFirst) {
+				t.Fatalf("expected normalized env collision issue, got %#v", issues)
+			}
+			if containsMessage(issues, "duplicate node id") {
+				t.Fatalf("did not expect literal duplicate issue for normalized collision, got %#v", issues)
+			}
+		})
+	}
+}
+
+func TestParseYAMLStillReportsDuplicateLiteralNodeIDs(t *testing.T) {
+	input := `name: duplicate
+description: duplicate
+nodes:
+  - id: same-id
+    prompt: first
+  - id: same-id
+    prompt: second
+`
+	_, issues := ParseYAML(input)
+
+	if !containsNodeIssue(issues, "same-id", "id", "duplicate node id") {
+		t.Fatalf("expected duplicate node id issue, got %#v", issues)
+	}
+	if containsMessage(issues, "collides with node id") {
+		t.Fatalf("did not expect collision issue for exact duplicate id, got %#v", issues)
+	}
+}
+
 func TestParseYAMLValidatesNodeTypesAndTriggerRules(t *testing.T) {
 	input := `name: invalid
 description: invalid
@@ -221,6 +301,30 @@ nodes:
 	}
 	if !containsMessage(issues, "cycle") {
 		t.Fatalf("expected cycle issue, got %#v", issues)
+	}
+}
+
+func TestEmbeddedWorkflowTemplatesKeepValidNodeIDs(t *testing.T) {
+	source := os.DirFS("../..")
+	paths, err := fs.Glob(source, "cmd/server/web/workflows/*.yaml")
+	if err != nil {
+		t.Fatalf("glob embedded workflows: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("expected embedded workflow templates")
+	}
+
+	for _, templatePath := range paths {
+		t.Run(filepath.Base(templatePath), func(t *testing.T) {
+			content, err := fs.ReadFile(source, templatePath)
+			if err != nil {
+				t.Fatalf("read template: %v", err)
+			}
+			_, issues := ParseYAML(string(content))
+			if HasErrors(issues) {
+				t.Fatalf("expected no template validation errors, got %#v", issues)
+			}
+		})
 	}
 }
 
