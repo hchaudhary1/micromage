@@ -27,6 +27,8 @@ Use a custom port when needed:
 PORT=3000 go run ./cmd/server
 ```
 
+The server binds to `127.0.0.1:8080` by default. Set `MICROMAGE_HOST` to opt into another bind address, and set `MICROMAGE_PORT` or `PORT` to change the port. Production HTTP limits are configurable with `MICROMAGE_READ_TIMEOUT`, `MICROMAGE_READ_HEADER_TIMEOUT`, `MICROMAGE_WRITE_TIMEOUT`, `MICROMAGE_IDLE_TIMEOUT`, and `MICROMAGE_SHUTDOWN_TIMEOUT`; values use Go duration strings such as `30s`, `5m`, or `30m`.
+
 ## Test And Coverage
 
 Run the full test suite:

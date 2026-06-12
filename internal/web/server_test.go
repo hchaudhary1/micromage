@@ -238,6 +238,17 @@ func TestPreviewEndpointReportsEmptyAndMalformedPayloads(t *testing.T) {
 	}
 }
 
+func TestPreviewEndpointRejectsOversizedRequestBodies(t *testing.T) {
+	server := newTestServer(t)
+	body := `{"yaml": "` + strings.Repeat("x", int(maxRequestBodyBytes)) + `"}`
+
+	response := postJSON(server, "/api/preview", body)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d with %q", response.Code, response.Body.String())
+	}
+}
+
 func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 	server := newTestServer(t)
 
@@ -296,6 +307,17 @@ func TestRunEndpointRejectsInvalidJSON(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", response.Code)
+	}
+}
+
+func TestRunEndpointRejectsOversizedRequestBodies(t *testing.T) {
+	server := newTestServer(t)
+	body := `{"yaml": "` + strings.Repeat("x", int(maxRequestBodyBytes)) + `"}`
+
+	response := postJSON(server, "/api/run", body)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d with %q", response.Code, response.Body.String())
 	}
 }
 

@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"html/template"
 	"io/fs"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 
 	"micromage/internal/workflow"
 )
+
+const maxRequestBodyBytes int64 = 1 << 20
 
 type Server struct {
 	templates         *template.Template
@@ -197,7 +200,14 @@ func readYAMLRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) {
 	defer r.Body.Close()
 	var request yamlRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	// Bound request bodies keep workflow submissions from exhausting server memory.
+	limitedBody := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	if err := json.NewDecoder(limitedBody).Decode(&request); err != nil {
+		var bodyTooLarge *http.MaxBytesError
+		if errors.As(err, &bodyTooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return yamlRequest{}, false
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return yamlRequest{}, false
 	}
