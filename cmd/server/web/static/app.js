@@ -11,6 +11,7 @@ const issueCounts = document.querySelector("#issue-counts");
 const dagSvg = document.querySelector("#dag-svg");
 const inspectorBody = document.querySelector("#inspector-body");
 const runLog = document.querySelector("#run-log");
+const templateState = window.MicromageTemplateState;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const NODE_WIDTH = 190;
@@ -18,6 +19,8 @@ const NODE_HEIGHT = 82;
 let currentPreview = null;
 let selectedNodeId = "";
 let previewTimer = 0;
+let currentTemplateID = "";
+let templateBaselineYaml = "";
 
 async function boot() {
   const response = await fetch("/api/templates");
@@ -26,8 +29,23 @@ async function boot() {
     .map((template) => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name || template.id)}</option>`)
     .join("");
   templateSelect.addEventListener("change", () => {
-    const selected = templates.find((template) => template.id === templateSelect.value);
-    yamlEditor.value = selected ? selected.yaml : "";
+    // Manual workflow edits need an explicit overwrite decision before template swaps.
+    const change = templateState.resolveTemplateChange({
+      templates,
+      requestedTemplateID: templateSelect.value,
+      previousTemplateID: currentTemplateID,
+      currentYaml: yamlEditor.value,
+      baselineYaml: templateBaselineYaml,
+      confirmOverwrite: () => window.confirm("Switch templates and discard your YAML edits?"),
+    });
+    if (!change.accepted) {
+      templateSelect.value = change.selectedTemplateID;
+      return;
+    }
+
+    currentTemplateID = change.selectedTemplateID;
+    templateBaselineYaml = change.baselineYaml;
+    yamlEditor.value = change.yaml;
     selectedNodeId = "";
     updatePreview();
   });
@@ -39,7 +57,10 @@ async function boot() {
   runMode.addEventListener("change", updatePreview);
 
   const first = templates[0];
-  yamlEditor.value = first ? first.yaml : "";
+  currentTemplateID = first ? first.id : "";
+  templateBaselineYaml = first ? first.yaml : "";
+  yamlEditor.value = templateBaselineYaml;
+  templateSelect.value = currentTemplateID;
   await updatePreview();
 }
 
