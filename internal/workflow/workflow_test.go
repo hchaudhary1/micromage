@@ -640,6 +640,94 @@ func TestRealRunnerMaterializesDeclaredOutputFromProviderResponse(t *testing.T) 
 	}
 }
 
+func TestRealWorkflowExecutionFeedsDeclaredArtifactsToDownstreamNodes(t *testing.T) {
+	dir := t.TempDir()
+	artifactsDir := filepath.Join(dir, ".micromage", "runs", "run-e2e")
+	reviewArtifact := filepath.Join(artifactsDir, "review", "code-review-findings.md")
+	synthesisArtifact := filepath.Join(artifactsDir, "review", "consolidated-review.md")
+	provider := &captureProvider{writeFiles: map[string]string{
+		reviewArtifact: "artifact-backed finding",
+	}}
+	parsed, issues := ParseYAML(`name: artifact-e2e
+description: artifact e2e
+provider: capture
+nodes:
+  - id: code-review
+    prompt: review
+    outputs:
+      - $ARTIFACTS_DIR/review/code-review-findings.md
+  - id: synthesize
+    prompt: "Summarize: $code-review.output"
+    depends_on: [code-review]
+    outputs:
+      - $ARTIFACTS_DIR/review/consolidated-review.md
+`)
+	if HasErrors(issues) {
+		t.Fatalf("expected valid workflow, got %#v", issues)
+	}
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    artifactsDir,
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	// Real workflow runs must pass artifact-backed review output into synthesis prompts.
+	err := Execute(context.Background(), parsed, runner, func(RunEvent) error { return nil })
+
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected two provider calls, got %#v", provider.requests)
+	}
+	if !strings.Contains(provider.requests[1].Prompt, "artifact-backed finding") {
+		t.Fatalf("expected downstream prompt to receive artifact output, got %q", provider.requests[1].Prompt)
+	}
+	reviewData, err := os.ReadFile(reviewArtifact)
+	if err != nil {
+		t.Fatalf("expected review artifact: %v", err)
+	}
+	if strings.TrimSpace(string(reviewData)) != "artifact-backed finding" {
+		t.Fatalf("unexpected review artifact content: %q", string(reviewData))
+	}
+	synthesisData, err := os.ReadFile(synthesisArtifact)
+	if err != nil {
+		t.Fatalf("expected synthesis artifact: %v", err)
+	}
+	if strings.TrimSpace(string(synthesisData)) != "captured" {
+		t.Fatalf("unexpected synthesis artifact content: %q", string(synthesisData))
+	}
+}
+
+func TestRealRunnerDoesNotPublishPartialProviderOutputAfterError(t *testing.T) {
+	provider := &captureProvider{output: "partial finding", err: errors.New("provider stream failed")}
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-partial", "review", "code-review-findings.md")
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    filepath.Join(dir, ".micromage", "runs", "run-partial"),
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"$ARTIFACTS_DIR/review/code-review-findings.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err == nil || !strings.Contains(err.Error(), "provider stream failed") {
+		t.Fatalf("expected provider error, got %v", err)
+	}
+	if _, ok := runner.outputs["code-review"]; ok {
+		t.Fatalf("partial provider output should not be published, got %#v", runner.outputs)
+	}
+	if _, err := os.Stat(artifactPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("partial provider output should not materialize artifact, stat err=%v", err)
+	}
+}
+
 func TestRealRunnerCapturesDeclaredOutput(t *testing.T) {
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-5", "review", "code-review-findings.md")
@@ -740,6 +828,41 @@ exit 0
 
 	if err == nil || !strings.Contains(err.Error(), "empty output") {
 		t.Fatalf("expected empty output error, got %v", err)
+	}
+}
+
+func TestRealRunnerDoesNotPublishOpenCodeOutputAfterEmitError(t *testing.T) {
+	command := writeExecutable(t, `#!/bin/sh
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"partial finding"}}'
+sleep 1
+`)
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-emit-error", "review", "code-review-findings.md")
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:          dir,
+		ArtifactsDir: filepath.Join(dir, ".micromage", "runs", "run-emit-error"),
+		Providers:    ProviderRegistry{"opencode": OpenCodeProvider{Command: command}},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"$ARTIFACTS_DIR/review/code-review-findings.md"},
+	}, func(event RunEvent) error {
+		if event.Type == "node_log" {
+			return errors.New("emit failed")
+		}
+		return nil
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "emit failed") {
+		t.Fatalf("expected emit error, got %v", err)
+	}
+	if _, ok := runner.outputs["code-review"]; ok {
+		t.Fatalf("partial opencode output should not be published, got %#v", runner.outputs)
+	}
+	if _, err := os.Stat(artifactPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("partial opencode output should not materialize artifact, stat err=%v", err)
 	}
 }
 
@@ -894,6 +1017,8 @@ func countEvents(events []RunEvent, eventType string) int {
 type captureProvider struct {
 	requests   []PromptRequest
 	writeFiles map[string]string
+	output     string
+	err        error
 }
 
 func (provider *captureProvider) RunPrompt(_ context.Context, request PromptRequest, _ EventSink) (string, error) {
@@ -905,6 +1030,9 @@ func (provider *captureProvider) RunPrompt(_ context.Context, request PromptRequ
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return "", err
 		}
+	}
+	if provider.output != "" || provider.err != nil {
+		return provider.output, provider.err
 	}
 	return "captured", nil
 }

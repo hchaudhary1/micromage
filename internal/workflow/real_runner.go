@@ -19,6 +19,7 @@ import (
 const DefaultOpenCodeModel = "opencode/nemotron-3-ultra-free"
 const maxOpenCodeTokenSize = 8 * 1024 * 1024
 
+// OpenCode 1.16.2 uses one local SQLite database, so provider calls stay serialized to avoid lock failures.
 var openCodeMu sync.Mutex
 
 type PromptRequest struct {
@@ -167,6 +168,7 @@ func (runner *RealRunner) runAI(ctx context.Context, node Node, prompt string, e
 		ArtifactsDir: runner.artifactsDir,
 	}, emit)
 	if err == nil {
+		// Failed AI streams can include partial text, so only completed runs publish downstream outputs.
 		if artifactOutput, artifactErr := runner.collectExpectedOutputs(node, output); artifactErr != nil {
 			return artifactErr
 		} else if artifactOutput != "" {
