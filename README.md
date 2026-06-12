@@ -96,6 +96,7 @@ cmd/server/web/workflows/      Embedded starter workflow YAML templates
 cmd/server/web/commands/       Embedded command prompt Markdown assets
 internal/workflow/             YAML parsing, validation, layout, templates, commands, and runners
 internal/web/                  HTTP handlers and tests
+docs/                          Design notes for production persistence and operations
 .githooks/                     Tracked Git hooks
 ```
 
@@ -205,6 +206,7 @@ The serialization can be revisited if OpenCode adds documented per-run storage i
 - Keep the app Go-first and dependency-light.
 - Avoid NPM dependencies at all costs.
 - Golang libraries are allowed when they fit the project.
+- Persistence design lives in [docs/persistence-design.md](docs/persistence-design.md).
 - Add or update tests with each feature change.
 - Maintain at least 70% total coverage.
 - Leave short comments for business intent when adding non-obvious code paths.
