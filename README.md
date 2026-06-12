@@ -118,10 +118,27 @@ internal/web/                  HTTP handlers and tests
 Real execution is opt-in because workflows can modify files, create commits, push branches, and open PRs.
 
 ```sh
-MICROMAGE_ENABLE_REAL_RUNS=1 go run ./cmd/server
+MICROMAGE_ENABLE_REAL_RUNS=1 MICROMAGE_REAL_RUN_TOKEN="$(openssl rand -hex 24)" go run ./cmd/server
 ```
 
-Then choose **Real** in the run mode selector or call `/api/run` with `mode: "real"` and optional `arguments`. OpenCode runs use:
+Then choose **Real** in the run mode selector or call `/api/run` with `mode: "real"` and optional `arguments`. Real `/api/run` requests require a local Host/Origin, `Content-Type: application/json`, and `Authorization: Bearer <MICROMAGE_REAL_RUN_TOKEN>`.
+
+For browser-triggered real runs, store the token in local storage for the local Micromage origin:
+
+```js
+localStorage.setItem("micromageRealRunToken", "<token>")
+```
+
+For direct API calls:
+
+```sh
+curl -N http://127.0.0.1:8080/api/run \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MICROMAGE_REAL_RUN_TOKEN" \
+  --data '{"mode":"real","yaml":"name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n"}'
+```
+
+OpenCode runs use:
 
 ```text
 opencode run --model opencode/nemotron-3-ultra-free --format json --dir <repo> <prompt>

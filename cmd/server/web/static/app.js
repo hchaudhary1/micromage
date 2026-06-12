@@ -157,7 +157,7 @@ async function runWorkflow() {
   appendLog("opening run stream");
   const response = await fetch("/api/run", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: runRequestHeaders(),
     body: JSON.stringify({
       yaml: yamlEditor.value,
       arguments: runArguments.value,
@@ -196,6 +196,16 @@ async function runWorkflow() {
     }
   }
   runButton.disabled = !currentPreview?.can_run;
+}
+
+function runRequestHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  const token = window.localStorage?.getItem("micromageRealRunToken") || "";
+  if (token) {
+    // Real-run tokens keep browser-triggered shell execution operator-approved.
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 function appendPreviewIssues(preview) {

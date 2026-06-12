@@ -320,10 +320,102 @@ func TestRunEndpointRejectsRealModeUnlessEnabled(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "")
 	server := newTestServer(t)
 
-	response := postJSON(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n", "mode": "real"}`)
+	response := postJSONWithToken(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n", "mode": "real"}`, "secret")
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d with %q", response.Code, response.Body.String())
+	}
+}
+
+func TestRunEndpointRejectsRealModeWhenTokenIsNotConfigured(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "")
+	server := newTestServer(t)
+
+	response := postJSONWithToken(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`, "secret")
+
+	assertPlainHTTPError(t, response, http.StatusForbidden)
+	if !strings.Contains(response.Body.String(), "MICROMAGE_REAL_RUN_TOKEN") {
+		t.Fatalf("expected actionable token configuration error, got %q", response.Body.String())
+	}
+}
+
+func TestRunEndpointRejectsRealModeWithMissingOrWrongToken(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
+	server := newTestServer(t)
+	body := `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`
+
+	missing := postJSON(server, "/api/run", body)
+	assertPlainHTTPError(t, missing, http.StatusUnauthorized)
+
+	wrong := postJSONWithToken(server, "/api/run", body, "wrong")
+	assertPlainHTTPError(t, wrong, http.StatusUnauthorized)
+}
+
+func TestRunEndpointRejectsRealModeFromRemoteHost(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
+	server := newTestServer(t)
+
+	response := postJSONWithOptions(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`, requestOptions{
+		token: "secret",
+		host:  "workstation.example.com",
+	})
+
+	assertPlainHTTPError(t, response, http.StatusForbidden)
+}
+
+func TestRunEndpointRejectsRealModeFromRemoteOrigin(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
+	server := newTestServer(t)
+
+	response := postJSONWithOptions(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`, requestOptions{
+		token:  "secret",
+		origin: "https://evil.example.com",
+	})
+
+	assertPlainHTTPError(t, response, http.StatusForbidden)
+}
+
+func TestRunEndpointAllowsRealModeFromLocalOriginWithBearerToken(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
+	server := newTestServer(t).(*Server)
+	server.workingDirectory = func() string { return t.TempDir() }
+	server.nextRunID = func() string { return "local-origin" }
+
+	response := postJSONWithOptions(server, "/api/run", `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`, requestOptions{
+		contentType: "Application/JSON; charset=utf-8",
+		token:       "secret",
+		host:        "127.0.0.1:8080",
+		origin:      "http://localhost:8080",
+	})
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected local real run to stream, got %d with %q", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("expected event stream, got %q", contentType)
+	}
+	if _, ok := findRunEvent(decodeSSEEvents(t, response), "run_summary"); !ok {
+		t.Fatalf("expected run_summary event, got %q", response.Body.String())
+	}
+}
+
+func TestRunAndPreviewEndpointsRequireJSONContentType(t *testing.T) {
+	server := newTestServer(t)
+	body := `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    prompt: plan\n"}`
+
+	preview := postRawWithOptions(server, "/api/preview", body, requestOptions{})
+	if preview.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected preview 415, got %d with %q", preview.Code, preview.Body.String())
+	}
+
+	run := postRawWithOptions(server, "/api/run", body, requestOptions{contentType: "text/plain"})
+	if run.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected run 415, got %d with %q", run.Code, run.Body.String())
 	}
 }
 
@@ -339,6 +431,7 @@ func TestRunEndpointRejectsInvalidWorkflow(t *testing.T) {
 
 func TestRunEndpointRejectsUnsupportedRealNodeKindsBeforeStreaming(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
 	server := newTestServer(t)
 	input := `name: real-kinds
 description: real kinds
@@ -357,7 +450,7 @@ nodes:
       source: console.log("hi")
 `
 
-	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+	response := postJSONWithToken(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, "secret")
 
 	assertPreviewValidationResponse(t, response)
 	var preview workflow.Preview
@@ -382,6 +475,7 @@ nodes:
 
 func TestRunEndpointRejectsUnregisteredRealProviderBeforeStreaming(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
 	server := newTestServer(t)
 	input := `name: real-provider
 description: real provider
@@ -391,7 +485,7 @@ nodes:
     prompt: plan
 `
 
-	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+	response := postJSONWithToken(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, "secret")
 
 	assertPreviewValidationResponse(t, response)
 	var preview workflow.Preview
@@ -405,6 +499,7 @@ nodes:
 
 func TestRunEndpointRejectsIgnoredRealSemanticsBeforeStreaming(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
 	server := newTestServer(t)
 	input := `name: real-semantics
 description: real semantics
@@ -424,7 +519,7 @@ nodes:
     allowed_tools: [Read]
 `
 
-	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+	response := postJSONWithToken(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, "secret")
 
 	assertPreviewValidationResponse(t, response)
 	var preview workflow.Preview
@@ -466,6 +561,7 @@ func TestRunEndpointRejectsOversizedRequestBodies(t *testing.T) {
 
 func TestRealRunEndpointStreamsArtifactsAndFailureSummary(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
 	server := newTestServer(t).(*Server)
 	dir := t.TempDir()
 	server.workingDirectory = func() string { return dir }
@@ -484,7 +580,9 @@ nodes:
     bash: exit 7
 `
 
-	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+	response := postJSONWithOptions(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, requestOptions{
+		token: "secret",
+	})
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
@@ -567,13 +665,47 @@ func newTestServer(t *testing.T) http.Handler {
 	return server
 }
 
+type requestOptions struct {
+	contentType string
+	token       string
+	host        string
+	origin      string
+}
+
 func postJSON(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
-	return postRaw(handler, path, body)
+	return postJSONWithOptions(handler, path, body, requestOptions{})
+}
+
+func postJSONWithToken(handler http.Handler, path string, body string, token string) *httptest.ResponseRecorder {
+	return postJSONWithOptions(handler, path, body, requestOptions{token: token})
+}
+
+func postJSONWithOptions(handler http.Handler, path string, body string, options requestOptions) *httptest.ResponseRecorder {
+	if options.contentType == "" {
+		options.contentType = "application/json"
+	}
+	return postRawWithOptions(handler, path, body, options)
 }
 
 func postRaw(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
+	return postJSON(handler, path, body)
+}
+
+func postRawWithOptions(handler http.Handler, path string, body string, options requestOptions) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
+	request.Host = "localhost"
+	if options.host != "" {
+		request.Host = options.host
+	}
+	if options.contentType != "" {
+		request.Header.Set("Content-Type", options.contentType)
+	}
+	if options.token != "" {
+		request.Header.Set("Authorization", "Bearer "+options.token)
+	}
+	if options.origin != "" {
+		request.Header.Set("Origin", options.origin)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
@@ -641,6 +773,16 @@ func assertPreviewValidationResponse(t *testing.T, response *httptest.ResponseRe
 	contentType := response.Header().Get("Content-Type")
 	if strings.Contains(contentType, "text/event-stream") || !strings.Contains(contentType, "application/json") {
 		t.Fatalf("expected JSON validation response before streaming, got content-type %q and body %q", contentType, response.Body.String())
+	}
+}
+
+func assertPlainHTTPError(t *testing.T, response *httptest.ResponseRecorder, status int) {
+	t.Helper()
+	if response.Code != status {
+		t.Fatalf("expected %d, got %d with %q", status, response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("expected normal HTTP error before streaming, got SSE body %q", response.Body.String())
 	}
 }
 

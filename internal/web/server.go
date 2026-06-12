@@ -1,11 +1,16 @@
 package web
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"html/template"
 	"io/fs"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -99,11 +104,6 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	preview := s.previewForRequest(request)
-	if !preview.CanRun {
-		writeJSON(w, http.StatusBadRequest, preview)
-		return
-	}
 	mode := request.Mode
 	if mode == "" {
 		mode = "simulate"
@@ -112,8 +112,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid run mode", http.StatusBadRequest)
 		return
 	}
-	if mode == "real" && os.Getenv("MICROMAGE_ENABLE_REAL_RUNS") != "1" {
-		http.Error(w, "real runs require MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
+	if mode == "real" {
+		if !authorizeRealRun(w, r) {
+			return
+		}
+	}
+	preview := s.previewForRequest(request)
+	if !preview.CanRun {
+		writeJSON(w, http.StatusBadRequest, preview)
 		return
 	}
 
@@ -211,6 +217,10 @@ type yamlRequest struct {
 
 func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) {
 	defer r.Body.Close()
+	if !hasJSONContentType(r) {
+		http.Error(w, "JSON endpoints require Content-Type: application/json", http.StatusUnsupportedMediaType)
+		return yamlRequest{}, false
+	}
 	var request yamlRequest
 	// Bound request bodies keep workflow submissions from exhausting server memory.
 	limitedBody := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
@@ -224,6 +234,98 @@ func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) 
 		return yamlRequest{}, false
 	}
 	return request, true
+}
+
+func hasJSONContentType(r *http.Request) bool {
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+func authorizeRealRun(w http.ResponseWriter, r *http.Request) bool {
+	if os.Getenv("MICROMAGE_ENABLE_REAL_RUNS") != "1" {
+		http.Error(w, "real runs require MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
+		return false
+	}
+	token := os.Getenv("MICROMAGE_REAL_RUN_TOKEN")
+	if token == "" {
+		http.Error(w, "real runs require MICROMAGE_REAL_RUN_TOKEN when MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
+		return false
+	}
+	if !isTrustedLocalHost(r.Host) {
+		http.Error(w, "real runs require a local Host header", http.StatusForbidden)
+		return false
+	}
+	if !isTrustedLocalOrigin(r.Header.Get("Origin")) {
+		http.Error(w, "real runs require a local Origin header when Origin is present", http.StatusForbidden)
+		return false
+	}
+	if !realRunTokenMatches(token, requestRealRunToken(r)) {
+		http.Error(w, "real runs require Authorization: Bearer MICROMAGE_REAL_RUN_TOKEN", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func requestRealRunToken(r *http.Request) string {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if scheme, value, ok := strings.Cut(auth, " "); ok && strings.EqualFold(scheme, "Bearer") {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(r.Header.Get("X-Micromage-Run-Token"))
+}
+
+func realRunTokenMatches(expected string, provided string) bool {
+	if provided == "" {
+		return false
+	}
+	expectedHash := sha256.Sum256([]byte(expected))
+	providedHash := sha256.Sum256([]byte(provided))
+	// Real-run authorization gates local shell execution with a timing-stable token check.
+	return subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1
+}
+
+func isTrustedLocalOrigin(origin string) bool {
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	return isTrustedLocalHost(parsed.Host)
+}
+
+func isTrustedLocalHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	hostname, err := hostnameWithoutPort(host)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && (ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.ParseIP("::1")))
+}
+
+func hostnameWithoutPort(host string) (string, error) {
+	hostname, _, err := net.SplitHostPort(host)
+	if err == nil {
+		return strings.Trim(hostname, "[]"), nil
+	}
+	if strings.Contains(err.Error(), "missing port in address") {
+		return strings.Trim(host, "[]"), nil
+	}
+	if strings.Count(host, ":") > 1 && net.ParseIP(host) != nil {
+		return host, nil
+	}
+	return "", err
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
