@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 )
 
 const runStoreSchemaVersion = 1
+const defaultCleanupRetention = 30 * 24 * time.Hour
+const defaultCleanupKeepTerminalRuns = 20
 
 type RunStatus string
 
@@ -75,6 +78,7 @@ type RunStore struct {
 	runsDir    string
 	now        func() time.Time
 	newEventID func() string
+	removeAll  func(string) error
 	audit      *AuditStore
 }
 
@@ -96,6 +100,35 @@ type runLifecycleEvent struct {
 	FailureReason string        `json:"failure_reason,omitempty"`
 }
 
+type CleanupPolicy struct {
+	DryRun           bool          `json:"dry_run"`
+	OlderThan        time.Duration `json:"older_than"`
+	KeepTerminalRuns int           `json:"keep_terminal_runs"`
+}
+
+type CleanupReport struct {
+	DryRun           bool             `json:"dry_run"`
+	OlderThan        time.Duration    `json:"older_than"`
+	KeepTerminalRuns int              `json:"keep_terminal_runs"`
+	StartedAt        time.Time        `json:"started_at"`
+	Candidates       []CleanupRun     `json:"candidates"`
+	Deleted          []CleanupRun     `json:"deleted"`
+	Failed           []CleanupFailure `json:"failed"`
+}
+
+type CleanupRun struct {
+	RunID        string    `json:"run_id"`
+	WorkflowID   string    `json:"workflow_id"`
+	Status       RunStatus `json:"status"`
+	FinishedAt   time.Time `json:"finished_at"`
+	ArtifactsDir string    `json:"artifacts_dir"`
+}
+
+type CleanupFailure struct {
+	Run   CleanupRun `json:"run"`
+	Error string     `json:"error"`
+}
+
 func NewRunStore(repoRoot string) *RunStore {
 	if repoRoot == "" {
 		repoRoot = "."
@@ -108,7 +141,8 @@ func NewRunStore(repoRoot string) *RunStore {
 		newEventID: func() string {
 			return "run-event-" + fmt.Sprintf("%d", time.Now().UnixNano())
 		},
-		audit: NewAuditStore(cleanRoot),
+		removeAll: os.RemoveAll,
+		audit:     NewAuditStore(cleanRoot),
 	}
 }
 
@@ -176,6 +210,87 @@ func (store *RunStore) CancelRun(runID string, reason string) error {
 
 func (store *RunStore) ResumeRun(runID string) error {
 	return store.transitionRun(runID, RunStatusRunning, "run_resumed", RunResult{})
+}
+
+func (store *RunStore) CleanupRuns(ctx context.Context, policy CleanupPolicy) (CleanupReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved, err := resolveCleanupPolicy(policy)
+	if err != nil {
+		return CleanupReport{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return CleanupReport{}, err
+	}
+	if err := store.ensureReady(); err != nil {
+		return CleanupReport{}, err
+	}
+	index, err := store.readIndex()
+	if err != nil {
+		return CleanupReport{}, err
+	}
+	now := store.now().UTC()
+	report := CleanupReport{
+		DryRun:           resolved.DryRun,
+		OlderThan:        resolved.OlderThan,
+		KeepTerminalRuns: resolved.KeepTerminalRuns,
+		StartedAt:        now,
+	}
+	candidates := selectCleanupCandidates(index.Runs, resolved, now)
+	report.Candidates = cleanupRunsFromRecords(candidates)
+	if err := store.auditCleanupStarted(report); err != nil {
+		return report, err
+	}
+	for _, run := range candidates {
+		// Retention cleanup only acts inside the private run store so stale history cannot delete user files.
+		if _, err := store.cleanupRunPath(run); err != nil {
+			report.Failed = append(report.Failed, cleanupFailure(run, err))
+			_ = store.auditCleanupFailed(run, resolved.DryRun, err)
+		}
+	}
+	if len(report.Failed) > 0 {
+		return report, cleanupError(report.Failed)
+	}
+	if resolved.DryRun {
+		return report, nil
+	}
+
+	deleted := make(map[string]struct{})
+	for _, run := range candidates {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		runPath, err := store.cleanupRunPath(run)
+		if err != nil {
+			report.Failed = append(report.Failed, cleanupFailure(run, err))
+			_ = store.auditCleanupFailed(run, false, err)
+			continue
+		}
+		if err := store.removeAll(runPath); err != nil {
+			report.Failed = append(report.Failed, cleanupFailure(run, err))
+			_ = store.auditCleanupFailed(run, false, err)
+			continue
+		}
+		cleanupRun := cleanupRunFromRecord(run)
+		report.Deleted = append(report.Deleted, cleanupRun)
+		deleted[run.RunID] = struct{}{}
+		if err := store.auditCleanupDeleted(run); err != nil {
+			report.Failed = append(report.Failed, CleanupFailure{Run: cleanupRun, Error: err.Error()})
+			return report, err
+		}
+	}
+	if len(deleted) > 0 {
+		index.Runs = removeDeletedRuns(index.Runs, deleted)
+		sortRunIndex(index.Runs)
+		if err := store.writeIndex(index); err != nil {
+			return report, err
+		}
+	}
+	if len(report.Failed) > 0 {
+		return report, cleanupError(report.Failed)
+	}
+	return report, nil
 }
 
 func ValidateRunTransition(from RunStatus, to RunStatus) error {
@@ -433,4 +548,195 @@ func sanitizeRunFailureReason(reason string) string {
 		reason = reason[:maxFailureReasonBytes] + "..."
 	}
 	return reason
+}
+
+func resolveCleanupPolicy(policy CleanupPolicy) (CleanupPolicy, error) {
+	if policy.OlderThan < 0 {
+		return CleanupPolicy{}, errors.New("cleanup older-than duration cannot be negative")
+	}
+	if policy.KeepTerminalRuns < 0 {
+		return CleanupPolicy{}, errors.New("cleanup keep terminal runs cannot be negative")
+	}
+	if policy.OlderThan == 0 {
+		policy.OlderThan = defaultCleanupRetention
+	}
+	if policy.KeepTerminalRuns == 0 {
+		policy.KeepTerminalRuns = defaultCleanupKeepTerminalRuns
+	}
+	return policy, nil
+}
+
+func selectCleanupCandidates(runs []RunRecord, policy CleanupPolicy, now time.Time) []RunRecord {
+	terminal := make([]RunRecord, 0, len(runs))
+	for _, run := range runs {
+		if isTerminalRunStatus(run.Status) {
+			terminal = append(terminal, run)
+		}
+	}
+	// Retention balances disk cleanup with enough recent terminal history for audit and debugging.
+	sort.SliceStable(terminal, func(i, j int) bool {
+		left := cleanupReferenceTime(terminal[i])
+		right := cleanupReferenceTime(terminal[j])
+		if left.Equal(right) {
+			return terminal[i].RunID < terminal[j].RunID
+		}
+		return left.After(right)
+	})
+	kept := make(map[string]struct{}, policy.KeepTerminalRuns)
+	for index, run := range terminal {
+		if index >= policy.KeepTerminalRuns {
+			break
+		}
+		kept[run.RunID] = struct{}{}
+	}
+	cutoff := now.Add(-policy.OlderThan)
+	var candidates []RunRecord
+	for _, run := range terminal {
+		if _, ok := kept[run.RunID]; ok {
+			continue
+		}
+		if cleanupReferenceTime(run).Before(cutoff) {
+			candidates = append(candidates, run)
+		}
+	}
+	return candidates
+}
+
+func isTerminalRunStatus(status RunStatus) bool {
+	switch status {
+	case RunStatusSucceeded, RunStatusFailed, RunStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanupReferenceTime(run RunRecord) time.Time {
+	if run.FinishedAt != nil && !run.FinishedAt.IsZero() {
+		return run.FinishedAt.UTC()
+	}
+	return run.CreatedAt.UTC()
+}
+
+func cleanupRunFromRecord(run RunRecord) CleanupRun {
+	return CleanupRun{
+		RunID:        run.RunID,
+		WorkflowID:   run.WorkflowID,
+		Status:       run.Status,
+		FinishedAt:   cleanupReferenceTime(run),
+		ArtifactsDir: run.ArtifactsDir,
+	}
+}
+
+func cleanupRunsFromRecords(runs []RunRecord) []CleanupRun {
+	cleanupRuns := make([]CleanupRun, 0, len(runs))
+	for _, run := range runs {
+		cleanupRuns = append(cleanupRuns, cleanupRunFromRecord(run))
+	}
+	return cleanupRuns
+}
+
+func (store *RunStore) cleanupRunPath(run RunRecord) (string, error) {
+	if strings.TrimSpace(run.ArtifactsDir) == "" {
+		return "", fmt.Errorf("run %s has no artifacts directory", run.RunID)
+	}
+	cleanPath := filepath.Clean(run.ArtifactsDir)
+	if !filepath.IsAbs(cleanPath) {
+		cleanPath = filepath.Join(store.repoRoot, cleanPath)
+	}
+	absRunPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve run %s artifacts directory: %w", run.RunID, err)
+	}
+	absRunsDir, err := filepath.Abs(store.runsDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve runs directory: %w", err)
+	}
+	rel, err := filepath.Rel(absRunsDir, absRunPath)
+	if err != nil {
+		return "", fmt.Errorf("check run %s artifacts directory containment: %w", run.RunID, err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("run %s artifacts directory %q is outside %s", run.RunID, run.ArtifactsDir, store.runsDir)
+	}
+	return absRunPath, nil
+}
+
+func removeDeletedRuns(runs []RunRecord, deleted map[string]struct{}) []RunRecord {
+	kept := runs[:0]
+	for _, run := range runs {
+		if _, ok := deleted[run.RunID]; ok {
+			continue
+		}
+		kept = append(kept, run)
+	}
+	return kept
+}
+
+func cleanupFailure(run RunRecord, err error) CleanupFailure {
+	return CleanupFailure{Run: cleanupRunFromRecord(run), Error: sanitizeRunFailureReason(err.Error())}
+}
+
+func cleanupError(failures []CleanupFailure) error {
+	if len(failures) == 0 {
+		return nil
+	}
+	if len(failures) == 1 {
+		return fmt.Errorf("cleanup failed for run %s: %s", failures[0].Run.RunID, failures[0].Error)
+	}
+	return fmt.Errorf("cleanup failed for %d runs", len(failures))
+}
+
+func (store *RunStore) auditCleanupStarted(report CleanupReport) error {
+	if store.audit == nil {
+		return nil
+	}
+	return store.audit.Append(AuditEvent{
+		Type:    AuditTypeRunCleanupStarted,
+		Actor:   AuditActorLocalBrowser,
+		Outcome: "success",
+		Details: map[string]string{
+			"dry_run":            strconv.FormatBool(report.DryRun),
+			"older_than":         report.OlderThan.String(),
+			"keep_terminal_runs": strconv.Itoa(report.KeepTerminalRuns),
+			"candidate_runs":     strconv.Itoa(len(report.Candidates)),
+		},
+	})
+}
+
+func (store *RunStore) auditCleanupDeleted(run RunRecord) error {
+	if store.audit == nil {
+		return nil
+	}
+	return store.audit.Append(AuditEvent{
+		Type:       AuditTypeRunCleanupDeleted,
+		RunID:      run.RunID,
+		WorkflowID: run.WorkflowID,
+		Actor:      AuditActorLocalBrowser,
+		Outcome:    "success",
+		Details: map[string]string{
+			"dry_run":       "false",
+			"artifacts_dir": run.ArtifactsDir,
+			"status":        string(run.Status),
+		},
+	})
+}
+
+func (store *RunStore) auditCleanupFailed(run RunRecord, dryRun bool, cause error) error {
+	if store.audit == nil {
+		return nil
+	}
+	return store.audit.Append(AuditEvent{
+		Type:       AuditTypeRunCleanupFailed,
+		RunID:      run.RunID,
+		WorkflowID: run.WorkflowID,
+		Actor:      AuditActorLocalBrowser,
+		Outcome:    "failure",
+		Details: map[string]string{
+			"dry_run":       strconv.FormatBool(dryRun),
+			"artifacts_dir": run.ArtifactsDir,
+			"status":        string(run.Status),
+			"reason":        cause.Error(),
+		},
+	})
 }

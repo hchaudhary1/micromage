@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -198,6 +200,178 @@ func TestRunStoreMalformedIndexFailsSafely(t *testing.T) {
 	}
 }
 
+func TestRunStoreCleanupUsesDefaultRetentionPolicy(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
+	store := NewRunStore(repo)
+	store.now = fixedClock(now)
+	store.audit.newEventID = sequenceAuditID()
+
+	var runs []RunRecord
+	for index := 0; index < 22; index++ {
+		finished := now.AddDate(0, 0, -45).Add(time.Duration(21-index) * time.Hour)
+		runs = append(runs, testRunRecord(repo, "run-old-"+strconv.Itoa(index), RunStatusSucceeded, finished))
+	}
+	runs = append(runs,
+		testRunRecord(repo, "run-running", RunStatusRunning, now.AddDate(0, 0, -90)),
+		testRunRecord(repo, "run-interrupted", RunStatusInterrupted, now.AddDate(0, 0, -90)),
+	)
+	writeRunIndexFile(t, repo, runs)
+
+	report, err := store.CleanupRuns(context.Background(), CleanupPolicy{DryRun: true})
+	if err != nil {
+		t.Fatalf("CleanupRuns returned error: %v", err)
+	}
+	if report.OlderThan != defaultCleanupRetention || report.KeepTerminalRuns != defaultCleanupKeepTerminalRuns || !report.DryRun {
+		t.Fatalf("expected default dry-run policy in report, got %#v", report)
+	}
+	if got := cleanupRunIDs(report.Candidates); strings.Join(got, ",") != "run-old-20,run-old-21" {
+		t.Fatalf("expected only terminal runs outside the most recent default keep window, got %v", got)
+	}
+}
+
+func TestRunStoreCleanupDryRunReportsCandidatesWithoutDeleting(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 6, 12, 13, 0, 0, 0, time.UTC)
+	store := NewRunStore(repo)
+	store.now = fixedClock(now)
+	store.audit.newEventID = sequenceAuditID()
+	old := testRunRecord(repo, "run-old", RunStatusFailed, now.AddDate(0, 0, -10))
+	recent := testRunRecord(repo, "run-recent", RunStatusSucceeded, now.Add(-time.Hour))
+	writeRunIndexFile(t, repo, []RunRecord{old, recent})
+	writeRunDirectory(t, repo, old.RunID)
+	writeRunDirectory(t, repo, recent.RunID)
+
+	report, err := store.CleanupRuns(context.Background(), CleanupPolicy{DryRun: true, OlderThan: 24 * time.Hour, KeepTerminalRuns: 1})
+	if err != nil {
+		t.Fatalf("CleanupRuns returned error: %v", err)
+	}
+	if got := cleanupRunIDs(report.Candidates); strings.Join(got, ",") != "run-old" {
+		t.Fatalf("expected old run candidate, got %v", got)
+	}
+	if len(report.Deleted) != 0 || len(report.Failed) != 0 {
+		t.Fatalf("dry-run should only report candidates, got %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".micromage", "runs", "run-old")); err != nil {
+		t.Fatalf("dry-run deleted candidate directory: %v", err)
+	}
+	if got := cleanupRunIDsFromIndex(readRunIndexFile(t, repo)); strings.Join(got, ",") != "run-old,run-recent" {
+		t.Fatalf("dry-run should preserve index, got %v", got)
+	}
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 1 || auditEvents[0].Type != AuditTypeRunCleanupStarted || auditEvents[0].Details["dry_run"] != "true" || auditEvents[0].Details["candidate_runs"] != "1" {
+		t.Fatalf("expected dry-run started audit event, got %#v", auditEvents)
+	}
+}
+
+func TestRunStoreCleanupDeleteUpdatesIndexAndRemovesDirectories(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 6, 12, 14, 0, 0, 0, time.UTC)
+	store := NewRunStore(repo)
+	store.now = fixedClock(now)
+	store.audit.newEventID = sequenceAuditID()
+	old := testRunRecord(repo, "run-delete", RunStatusCancelled, now.AddDate(0, 0, -60))
+	recent := testRunRecord(repo, "run-keep-terminal", RunStatusSucceeded, now.Add(-time.Hour))
+	running := testRunRecord(repo, "run-running", RunStatusRunning, now.AddDate(0, 0, -60))
+	writeRunIndexFile(t, repo, []RunRecord{old, recent, running})
+	for _, id := range []string{old.RunID, recent.RunID, running.RunID} {
+		writeRunDirectory(t, repo, id)
+	}
+
+	report, err := store.CleanupRuns(context.Background(), CleanupPolicy{OlderThan: 24 * time.Hour, KeepTerminalRuns: 1})
+	if err != nil {
+		t.Fatalf("CleanupRuns returned error: %v", err)
+	}
+	if got := cleanupRunIDs(report.Deleted); strings.Join(got, ",") != "run-delete" {
+		t.Fatalf("expected deleted run report, got %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".micromage", "runs", "run-delete")); !os.IsNotExist(err) {
+		t.Fatalf("expected candidate directory to be deleted, stat error: %v", err)
+	}
+	for _, id := range []string{recent.RunID, running.RunID} {
+		if _, err := os.Stat(filepath.Join(repo, ".micromage", "runs", id)); err != nil {
+			t.Fatalf("expected preserved run directory %s: %v", id, err)
+		}
+	}
+	if got := cleanupRunIDsFromIndex(readRunIndexFile(t, repo)); strings.Join(got, ",") != "run-keep-terminal,run-running" {
+		t.Fatalf("expected deleted run removed from index, got %v", got)
+	}
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 2 || auditEvents[0].Type != AuditTypeRunCleanupStarted || auditEvents[1].Type != AuditTypeRunCleanupDeleted {
+		t.Fatalf("expected started and deleted audit events, got %#v", auditEvents)
+	}
+	if auditEvents[1].RunID != "run-delete" || auditEvents[1].Details["artifacts_dir"] != old.ArtifactsDir {
+		t.Fatalf("unexpected deleted audit event: %#v", auditEvents[1])
+	}
+}
+
+func TestRunStoreCleanupRejectsPathsOutsideRunsDir(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 6, 12, 15, 0, 0, 0, time.UTC)
+	store := NewRunStore(repo)
+	store.now = fixedClock(now)
+	store.audit.newEventID = sequenceAuditID()
+	outsideDir := filepath.Join(repo, "outside-run")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("create outside dir: %v", err)
+	}
+	unsafe := testRunRecord(repo, "run-unsafe", RunStatusSucceeded, now.AddDate(0, 0, -60))
+	unsafe.ArtifactsDir = outsideDir
+	recent := testRunRecord(repo, "run-recent", RunStatusSucceeded, now.Add(-time.Hour))
+	writeRunIndexFile(t, repo, []RunRecord{unsafe, recent})
+
+	report, err := store.CleanupRuns(context.Background(), CleanupPolicy{OlderThan: 24 * time.Hour, KeepTerminalRuns: 1})
+	if err == nil {
+		t.Fatal("expected cleanup to reject outside run path")
+	}
+	if len(report.Failed) != 1 || report.Failed[0].Run.RunID != "run-unsafe" || !strings.Contains(report.Failed[0].Error, "outside") {
+		t.Fatalf("expected outside path failure report, got %#v", report)
+	}
+	if _, err := os.Stat(outsideDir); err != nil {
+		t.Fatalf("outside path should remain untouched: %v", err)
+	}
+	if got := cleanupRunIDsFromIndex(readRunIndexFile(t, repo)); strings.Join(got, ",") != "run-unsafe,run-recent" {
+		t.Fatalf("outside path failure should preserve index, got %v", got)
+	}
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 2 || auditEvents[1].Type != AuditTypeRunCleanupFailed || auditEvents[1].Outcome != "failure" {
+		t.Fatalf("expected cleanup failure audit event, got %#v", auditEvents)
+	}
+}
+
+func TestRunStoreCleanupReportsFailedDeleteInAudit(t *testing.T) {
+	repo := t.TempDir()
+	now := time.Date(2026, 6, 12, 16, 0, 0, 0, time.UTC)
+	store := NewRunStore(repo)
+	store.now = fixedClock(now)
+	store.audit.newEventID = sequenceAuditID()
+	old := testRunRecord(repo, "run-delete-fails", RunStatusFailed, now.AddDate(0, 0, -60))
+	recent := testRunRecord(repo, "run-recent", RunStatusSucceeded, now.Add(-time.Hour))
+	writeRunIndexFile(t, repo, []RunRecord{old, recent})
+	writeRunDirectory(t, repo, old.RunID)
+	store.removeAll = func(path string) error {
+		return errors.New("simulated remove failure")
+	}
+
+	report, err := store.CleanupRuns(context.Background(), CleanupPolicy{OlderThan: 24 * time.Hour, KeepTerminalRuns: 1})
+	if err == nil {
+		t.Fatal("expected delete failure")
+	}
+	if len(report.Deleted) != 0 || len(report.Failed) != 1 || report.Failed[0].Run.RunID != "run-delete-fails" {
+		t.Fatalf("expected failed delete report, got %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".micromage", "runs", old.RunID)); err != nil {
+		t.Fatalf("failed delete should leave directory in place: %v", err)
+	}
+	if got := cleanupRunIDsFromIndex(readRunIndexFile(t, repo)); strings.Join(got, ",") != "run-delete-fails,run-recent" {
+		t.Fatalf("failed delete should preserve index, got %v", got)
+	}
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 2 || auditEvents[1].Type != AuditTypeRunCleanupFailed || auditEvents[1].RunID != "run-delete-fails" || auditEvents[1].Details["reason"] != "simulated remove failure" {
+		t.Fatalf("expected failed delete audit event, got %#v", auditEvents)
+	}
+}
+
 func readRunIndexFile(t *testing.T, repo string) runIndex {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(repo, ".micromage", "runs", "index.json"))
@@ -209,6 +383,74 @@ func readRunIndexFile(t *testing.T, repo string) runIndex {
 		t.Fatalf("decode index: %v", err)
 	}
 	return index
+}
+
+func writeRunIndexFile(t *testing.T, repo string, runs []RunRecord) {
+	t.Helper()
+	runsDir := filepath.Join(repo, ".micromage", "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatalf("create runs dir: %v", err)
+	}
+	data, err := json.MarshalIndent(runIndex{SchemaVersion: runStoreSchemaVersion, Runs: runs}, "", "  ")
+	if err != nil {
+		t.Fatalf("encode test index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runsDir, "index.json"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write test index: %v", err)
+	}
+}
+
+func writeRunDirectory(t *testing.T, repo string, runID string) {
+	t.Helper()
+	runDir := filepath.Join(repo, ".micromage", "runs", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("create run dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "manifest.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write run manifest: %v", err)
+	}
+}
+
+func testRunRecord(repo string, runID string, status RunStatus, at time.Time) RunRecord {
+	record := RunRecord{
+		SchemaVersion:     runStoreSchemaVersion,
+		RunID:             runID,
+		WorkflowID:        "wf",
+		WorkflowName:      "Workflow",
+		Mode:              "real",
+		Status:            status,
+		CreatedAt:         at.Add(-time.Minute),
+		StartedAt:         &at,
+		CWD:               repo,
+		ArtifactsDir:      filepath.Join(".micromage", "runs", runID),
+		ArgumentsRedacted: true,
+		NodeCounts:        RunNodeCounts{Total: 1, Completed: 1},
+		ManifestPath:      filepath.Join(".micromage", "runs", runID, "manifest.json"),
+		SummaryPath:       filepath.Join(".micromage", "runs", runID, "summary.json"),
+	}
+	if isTerminalRunStatus(status) || status == RunStatusInterrupted {
+		finished := at
+		record.FinishedAt = &finished
+		duration := int64(time.Minute / time.Millisecond)
+		record.DurationMS = &duration
+	}
+	return record
+}
+
+func cleanupRunIDs(runs []CleanupRun) []string {
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		ids = append(ids, run.RunID)
+	}
+	return ids
+}
+
+func cleanupRunIDsFromIndex(index runIndex) []string {
+	ids := make([]string, 0, len(index.Runs))
+	for _, run := range index.Runs {
+		ids = append(ids, run.RunID)
+	}
+	return ids
 }
 
 func readRunEventLines(t *testing.T, repo string) []runLifecycleEvent {
