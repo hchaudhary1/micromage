@@ -4,12 +4,16 @@ const previewState = document.querySelector("#preview-state");
 const runButton = document.querySelector("#run-button");
 const runArguments = document.querySelector("#run-arguments");
 const runMode = document.querySelector("#run-mode");
+const cancelRunButton = document.querySelector("#cancel-run-button");
 const workflowSummary = document.querySelector("#workflow-summary");
 const workflowName = document.querySelector("#workflow-name");
 const workflowDescription = document.querySelector("#workflow-description");
+const runStatus = document.querySelector("#run-status");
 const issueCounts = document.querySelector("#issue-counts");
 const issuePanel = document.querySelector("#issue-panel");
+const graphWrap = document.querySelector(".graph-wrap");
 const dagSvg = document.querySelector("#dag-svg");
+const fitGraphButton = document.querySelector("#fit-graph-button");
 const inspectorBody = document.querySelector("#inspector-body");
 const runLog = document.querySelector("#run-log");
 const appState = window.MicromageTemplateState;
@@ -22,6 +26,12 @@ let selectedNodeId = "";
 let previewTimer = 0;
 let currentTemplateID = "";
 let templateBaselineYaml = "";
+let graphFitToScreen = false;
+let nodeRunStates = new Map();
+let runStartedAt = 0;
+let runStatusTimer = 0;
+let currentRunNodeId = "";
+let activeRunController = null;
 
 async function boot() {
   const response = await fetch("/api/templates");
@@ -55,6 +65,8 @@ async function boot() {
     previewTimer = window.setTimeout(updatePreview, 220);
   });
   runButton.addEventListener("click", runWorkflow);
+  cancelRunButton.addEventListener("click", cancelRun);
+  fitGraphButton.addEventListener("click", toggleGraphFit);
   runMode.addEventListener("change", updatePreview);
   issuePanel.addEventListener("click", (event) => {
     const target = event.target.closest?.("[data-node-id]");
@@ -73,6 +85,7 @@ async function boot() {
 }
 
 async function updatePreview() {
+  cancelActiveRunForPreviewChange();
   setState("Previewing", "busy");
   const response = await fetch("/api/preview", {
     method: "POST",
@@ -84,6 +97,7 @@ async function updatePreview() {
     }),
   });
   currentPreview = await response.json();
+  clearRunState();
   renderPreview(currentPreview);
 }
 
@@ -143,9 +157,14 @@ function renderIssueItem(issue) {
 
 function renderGraph(graph) {
   dagSvg.replaceChildren();
-  dagSvg.setAttribute("viewBox", `0 0 ${Math.max(graph.width, 720)} ${Math.max(graph.height, 420)}`);
-  dagSvg.setAttribute("width", "100%");
-  dagSvg.setAttribute("height", "100%");
+  const graphWidth = Math.max(graph.width, 720);
+  const graphHeight = Math.max(graph.height, 420);
+  dagSvg.setAttribute("viewBox", `0 0 ${graphWidth} ${graphHeight}`);
+  dagSvg.setAttribute("width", graphFitToScreen ? "100%" : String(graphWidth));
+  dagSvg.setAttribute("height", graphFitToScreen ? "100%" : String(graphHeight));
+  dagSvg.setAttribute("data-fit", graphFitToScreen ? "fit" : "actual");
+  graphWrap.className = `graph-wrap${graphFitToScreen ? " fit-to-screen" : ""}`;
+  fitGraphButton.textContent = graphFitToScreen ? "Actual size" : "Fit";
 
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   for (const edge of graph.edges) {
@@ -179,14 +198,16 @@ function renderGraph(graph) {
 }
 
 function renderNode(node) {
+  const runState = nodeRunStates.get(node.id) || "";
   const group = svg("g", {
-    class: `dag-node type-${node.type}${selectedNodeId === node.id ? " selected" : ""}${(node.issues || []).length ? " has-issues" : ""}`,
+    class: `dag-node type-${node.type}${selectedNodeId === node.id ? " selected" : ""}${(node.issues || []).length ? " has-issues" : ""}${runState ? ` run-state-${runState}` : ""}`,
     transform: `translate(${node.x}, ${node.y})`,
     tabindex: "0",
+    "aria-label": runState ? `${node.id} ${runState}` : node.id,
   });
   group.addEventListener("click", () => {
     selectedNodeId = node.id;
-    renderGraph(currentPreview.graph);
+    renderGraph(normalizedGraph(currentPreview?.graph));
     renderInspector();
   });
   group.appendChild(svg("rect", { width: NODE_WIDTH, height: NODE_HEIGHT, rx: "8" }));
@@ -197,6 +218,10 @@ function renderNode(node) {
   const badges = node.badges || [];
   if (badges.length) {
     group.appendChild(textEl(badges.slice(0, 2).join(" / "), 118, 20, "node-badge"));
+  }
+  if (runState) {
+    // Run-state overlays make long workflows auditable while the stream is still active.
+    group.appendChild(textEl(runState.toUpperCase(), 118, 66, `node-run-state node-run-state-${runState}`));
   }
   return group;
 }
@@ -215,7 +240,9 @@ function renderInspector() {
   const issues = (node.issues || [])
     .map((issue) => `<li class="${escapeHTML(issue.level)}">${escapeHTML(issue.message)}</li>`)
     .join("");
-  inspectorBody.innerHTML = `<dl>${metadata}</dl>${issues ? `<ul>${issues}</ul>` : ""}`;
+  const runState = nodeRunStates.get(node.id);
+  const runMetadata = runState ? `<dt>Run state</dt><dd>${escapeHTML(runState)}</dd>` : "";
+  inspectorBody.innerHTML = `<dl>${runMetadata}${metadata}</dl>${issues ? `<ul>${issues}</ul>` : ""}`;
 }
 
 async function runWorkflow() {
@@ -225,47 +252,73 @@ async function runWorkflow() {
     return;
   }
   runButton.disabled = true;
+  cancelRunButton.disabled = false;
   runLog.textContent = "";
   appendLog("opening run stream");
-  const response = await fetch("/api/run", {
-    method: "POST",
-    headers: runRequestHeaders(),
-    body: JSON.stringify({
-      yaml: yamlEditor.value,
-      arguments: runArguments.value,
-      mode: runMode.value,
-    }),
-  });
-  if (!response.ok) {
-    const rejection = await appState.readRunRejection(response);
-    if (rejection.preview) {
-      // Rejected real-run previews keep actionable validation visible after Run.
-      currentPreview = rejection.preview;
-      renderPreview(currentPreview);
+  startRunState();
+  const controller = new AbortController();
+  activeRunController = controller;
+  let runFinished = false;
+  try {
+    const response = await fetch("/api/run", {
+      method: "POST",
+      headers: runRequestHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({
+        yaml: yamlEditor.value,
+        arguments: runArguments.value,
+        mode: runMode.value,
+      }),
+    });
+    if (!response.ok) {
+      const rejection = await appState.readRunRejection(response);
+      clearRunState();
+      if (rejection.preview) {
+        // Rejected real-run previews keep actionable validation visible after Run.
+        currentPreview = rejection.preview;
+        renderPreview(currentPreview);
+      }
+      appendLog(rejection.summary, "log-error");
+      appendPreviewIssues(rejection.issues);
+      return;
     }
-    appendLog(rejection.summary, "log-error");
-    appendPreviewIssues(rejection.issues);
-    runButton.disabled = !currentPreview?.can_run;
-    return;
-  }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop();
-    for (const chunk of chunks) {
-      const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
-      if (!dataLine) continue;
-      const event = JSON.parse(dataLine.slice(6));
-      appendRunEvent(event);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop();
+      for (const chunk of chunks) {
+        const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        const event = JSON.parse(dataLine.slice(6));
+        appendRunEvent(event);
+      }
     }
+    runFinished = true;
+    if (runStatus.textContent.startsWith("Running ")) {
+      finishRunStatus("Finished");
+    }
+  } catch (error) {
+    if (!isAbortError(error)) {
+      finishRunStatus("Failed");
+      throw error;
+    }
+    finishRunStatus("Canceled");
+    appendLog("run canceled by browser; server stops when the stream connection closes", "log-detail");
+  } finally {
+    activeRunController = null;
+    cancelRunButton.disabled = true;
+    stopRunStatusTimer();
+    if (!runFinished && !currentRunNodeId && !runStartedAt) {
+      runStatus.textContent = "No run active";
+    }
+    runButton.disabled = !currentPreview?.can_run;
   }
-  runButton.disabled = !currentPreview?.can_run;
 }
 
 function confirmRealRunPreflight() {
@@ -290,7 +343,8 @@ function appendPreviewIssues(issues) {
 }
 
 function appendRunEvent(event) {
-  appendLog(event.message, event.type === "node_failed" || event.type === "workflow_failed" ? "log-error" : "");
+  appendLog(event.message || event.type, event.type === "node_failed" || event.type === "workflow_failed" ? "log-error" : "");
+  applyRunEvent(event);
   if (event.type === "run_summary") {
     appendRunSummary(event);
   }
@@ -320,6 +374,127 @@ function appendLog(message, className = "") {
 function setState(text, mode) {
   previewState.textContent = text;
   previewState.className = `state-pill ${mode}`;
+}
+
+function toggleGraphFit() {
+  graphFitToScreen = !graphFitToScreen;
+  renderGraph(normalizedGraph(currentPreview?.graph));
+}
+
+function cancelRun() {
+  if (!activeRunController) return;
+  // Client abort is the safest cancellation path because the server already scopes work to request context.
+  appendLog("cancel requested; closing run stream", "log-detail");
+  activeRunController.abort();
+}
+
+function cancelActiveRunForPreviewChange() {
+  if (!activeRunController) return;
+  // Workflow edits cancel the visible stream so operators do not monitor stale run state.
+  appendLog("preview changed; canceling active run stream", "log-detail");
+  activeRunController.abort();
+}
+
+function startRunState() {
+  runStartedAt = Date.now();
+  currentRunNodeId = "";
+  nodeRunStates = new Map(normalizedGraph(currentPreview?.graph).nodes.map((node) => [node.id, "queued"]));
+  renderGraph(normalizedGraph(currentPreview?.graph));
+  updateRunStatusText();
+  stopRunStatusTimer();
+  runStatusTimer = window.setInterval(updateRunStatusText, 1000);
+}
+
+function clearRunState() {
+  nodeRunStates = new Map();
+  runStartedAt = 0;
+  currentRunNodeId = "";
+  activeRunController = null;
+  cancelRunButton.disabled = true;
+  stopRunStatusTimer();
+  runStatus.textContent = "No run active";
+}
+
+function applyRunEvent(event) {
+  if (event.node_id) {
+    if (event.type === "node_start") {
+      currentRunNodeId = event.node_id;
+      nodeRunStates.set(event.node_id, "running");
+    } else if (event.type === "node_complete") {
+      nodeRunStates.set(event.node_id, "succeeded");
+      if (currentRunNodeId === event.node_id) currentRunNodeId = "";
+    } else if (event.type === "node_failed") {
+      nodeRunStates.set(event.node_id, "failed");
+      if (currentRunNodeId === event.node_id) currentRunNodeId = "";
+    } else if (event.type === "node_skipped") {
+      nodeRunStates.set(event.node_id, "skipped");
+      if (currentRunNodeId === event.node_id) currentRunNodeId = "";
+    }
+  }
+
+  if (event.type === "run_summary") {
+    for (const nodeID of event.completed_nodes || []) {
+      nodeRunStates.set(nodeID, "succeeded");
+    }
+    for (const failure of event.failed_nodes || []) {
+      if (failure.node_id) nodeRunStates.set(failure.node_id, "failed");
+    }
+    currentRunNodeId = "";
+  }
+
+  if (event.type === "workflow_complete") {
+    finishRunStatus("Succeeded");
+  } else if (event.type === "workflow_failed") {
+    if (currentRunNodeId) nodeRunStates.set(currentRunNodeId, "failed");
+    finishRunStatus("Failed");
+  } else if (event.type === "workflow_interrupted") {
+    finishRunStatus("Interrupted");
+  } else {
+    updateRunStatusText();
+  }
+  renderGraph(normalizedGraph(currentPreview?.graph));
+  renderInspector();
+}
+
+function finishRunStatus(label) {
+  stopRunStatusTimer();
+  const elapsed = formatElapsed(Date.now() - runStartedAt);
+  runStatus.textContent = `${label} in ${elapsed}`;
+  currentRunNodeId = "";
+}
+
+function updateRunStatusText() {
+  if (!runStartedAt) {
+    runStatus.textContent = "No run active";
+    return;
+  }
+  const elapsed = formatElapsed(Date.now() - runStartedAt);
+  const current = currentRunNodeId ? `Current: ${nodeDisplayName(currentRunNodeId)}` : "Current: waiting";
+  runStatus.textContent = `Running ${elapsed} - ${current}`;
+}
+
+function stopRunStatusTimer() {
+  if (!runStatusTimer) return;
+  window.clearInterval(runStatusTimer);
+  runStatusTimer = 0;
+}
+
+function nodeDisplayName(nodeID) {
+  const node = normalizedGraph(currentPreview?.graph).nodes.find((item) => item.id === nodeID);
+  return node?.label || nodeID;
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const mmss = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return hours ? `${hours}:${mmss}` : mmss;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
 }
 
 function edgePath(source, target) {

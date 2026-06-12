@@ -27,6 +27,7 @@
         </select>
         <span id="preview-state" class="state-pill">Preview</span>
         <button id="run-button" type="button" disabled>Run</button>
+        <button id="cancel-run-button" type="button" disabled>Cancel</button>
       </div>
     </header>
 
@@ -40,8 +41,12 @@
           <div>
             <h2 id="workflow-name">Workflow</h2>
             <p id="workflow-description"></p>
+            <p id="run-status">No run active</p>
           </div>
-          <div id="issue-counts" class="issue-counts"></div>
+          <div class="graph-actions">
+            <button id="fit-graph-button" type="button">Fit</button>
+            <div id="issue-counts" class="issue-counts"></div>
+          </div>
         </div>
 
         <section id="issue-panel" class="issue-panel empty" aria-label="Preview issues"></section>

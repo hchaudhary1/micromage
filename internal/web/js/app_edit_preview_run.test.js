@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { bootHarness, logText, response, runnablePreview, streamResponse } = require("./app_harness.js");
+const { bootHarness, flushAsyncWork, logText, response, runnablePreview, streamResponse } = require("./app_harness.js");
 
 const templates = [
   {
@@ -62,6 +62,84 @@ function workflowPreview(workflow) {
     graph: { edges: [], height: 180, nodes: workflow.nodes, width: 260 },
     workflow,
   });
+}
+
+function largeWorkflowPreview() {
+  return runnablePreview({
+    graph: {
+      edges: [{ source: "plan", target: "verify" }],
+      height: 220,
+      width: 1680,
+      nodes: [
+        {
+          id: "plan",
+          type: "prompt",
+          label: "Plan",
+          summary: "Plan the work",
+          metadata: {},
+          x: 24,
+          y: 32,
+        },
+        {
+          id: "verify",
+          type: "bash",
+          label: "Verify",
+          summary: "go test ./...",
+          metadata: {},
+          x: 1420,
+          y: 32,
+        },
+      ],
+    },
+    workflow: { name: "Large", description: "Wide graph" },
+  });
+}
+
+function graphNode(elements, nodeID) {
+  return elements["#dag-svg"].children.find(
+    (child) => child.class?.includes("dag-node") && child["aria-label"]?.startsWith(`${nodeID} `),
+  );
+}
+
+function abortError() {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function cancellableStreamResponse(signal, events) {
+  const encoder = new TextEncoder();
+  const chunks = events.map((event) => encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+  let index = 0;
+  let rejectPendingRead = null;
+  signal.addEventListener("abort", () => {
+    if (rejectPendingRead) {
+      rejectPendingRead(abortError());
+    }
+  });
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    headers: { get: () => "text/event-stream" },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index < chunks.length) {
+              return { done: false, value: chunks[index++] };
+            }
+            return new Promise((_resolve, reject) => {
+              rejectPendingRead = reject;
+              if (signal.aborted) {
+                reject(abortError());
+              }
+            });
+          },
+        };
+      },
+    },
+  };
 }
 
 async function testTemplateManualEditValidationAndNodeInspection() {
@@ -147,6 +225,104 @@ async function testSimulateRunStreamsLogAndSummary() {
   assert.equal(elements["#run-button"].disabled, false);
 }
 
+async function testGraphFitButtonTogglesActualAndFitSizing() {
+  const { elements } = await bootHarness({
+    templates,
+    preview: largeWorkflowPreview(),
+  });
+
+  assert.equal(elements["#dag-svg"].width, "1680");
+  assert.equal(elements["#dag-svg"]["data-fit"], "actual");
+  assert.equal(elements["#fit-graph-button"].textContent, "Fit");
+
+  elements["#fit-graph-button"].listeners.click();
+
+  assert.equal(elements["#dag-svg"].width, "100%");
+  assert.equal(elements["#dag-svg"].height, "100%");
+  assert.equal(elements["#dag-svg"]["data-fit"], "fit");
+  assert.match(elements[".graph-wrap"].className, /fit-to-screen/);
+  assert.equal(elements["#fit-graph-button"].textContent, "Actual size");
+}
+
+async function testRunStateOverlaysAndStatusContext() {
+  const { elements } = await bootHarness({
+    templates,
+    preview: largeWorkflowPreview(),
+    runResponse: streamResponse([
+      { type: "workflow_start", message: "workflow started" },
+      { type: "node_start", node_id: "plan", message: "starting plan" },
+      { type: "node_complete", node_id: "plan", message: "plan complete" },
+      { type: "node_start", node_id: "verify", message: "starting verify" },
+      { type: "node_failed", node_id: "verify", message: "verify failed" },
+      { type: "workflow_failed", message: "workflow failed" },
+    ]),
+  });
+
+  await elements["#run-button"].listeners.click();
+
+  assert.match(graphNode(elements, "plan").class, /run-state-succeeded/);
+  assert.match(graphNode(elements, "verify").class, /run-state-failed/);
+  assert.match(elements["#run-status"].textContent, /^Failed in 00:00/);
+  assert.match(logText(elements), /verify failed/);
+}
+
+async function testCancelRunAbortsOpenStream() {
+  const { elements, requests } = await bootHarness({
+    templates,
+    preview: largeWorkflowPreview(),
+    runResponseFor: (_body, requestOptions) =>
+      cancellableStreamResponse(requestOptions.signal, [
+        { type: "workflow_start", message: "workflow started" },
+        { type: "node_start", node_id: "plan", message: "starting plan" },
+      ]),
+  });
+
+  const runPromise = elements["#run-button"].listeners.click();
+  await flushAsyncWork();
+
+  assert.match(graphNode(elements, "plan").class, /run-state-running/);
+  assert.match(graphNode(elements, "verify").class, /run-state-queued/);
+  assert.match(elements["#run-status"].textContent, /^Running 00:00 - Current: Plan/);
+  assert.equal(elements["#cancel-run-button"].disabled, false);
+
+  elements["#cancel-run-button"].listeners.click();
+  await runPromise;
+
+  const runRequest = requests.find((request) => request.url === "/api/run");
+  assert.equal(runRequest.signal.aborted, true);
+  assert.match(logText(elements), /cancel requested; closing run stream/);
+  assert.match(logText(elements), /run canceled by browser/);
+  assert.match(elements["#run-status"].textContent, /^Canceled in 00:00/);
+  assert.equal(elements["#cancel-run-button"].disabled, true);
+  assert.equal(elements["#run-button"].disabled, false);
+}
+
+async function testPreviewChangeCancelsActiveRunStream() {
+  const { elements, requests, runPendingTimers } = await bootHarness({
+    templates,
+    preview: largeWorkflowPreview(),
+    runResponseFor: (_body, requestOptions) =>
+      cancellableStreamResponse(requestOptions.signal, [
+        { type: "workflow_start", message: "workflow started" },
+        { type: "node_start", node_id: "plan", message: "starting plan" },
+      ]),
+  });
+
+  const runPromise = elements["#run-button"].listeners.click();
+  await flushAsyncWork();
+
+  elements["#yaml-editor"].value += "\n# edit";
+  elements["#yaml-editor"].listeners.input();
+  await runPendingTimers();
+  await runPromise;
+
+  const runRequest = requests.find((request) => request.url === "/api/run");
+  assert.equal(runRequest.signal.aborted, true);
+  assert.match(logText(elements), /preview changed; canceling active run stream/);
+  assert.equal(elements["#cancel-run-button"].disabled, true);
+  assert.equal(elements["#run-button"].disabled, false);
+}
+
 async function testRunModeSelectionAndRealModeRejection() {
   const { confirms, elements, requests, runPendingTimers } = await bootHarness({
     templates,
@@ -181,6 +357,10 @@ async function testRunModeSelectionAndRealModeRejection() {
 async function main() {
   await testTemplateManualEditValidationAndNodeInspection();
   await testSimulateRunStreamsLogAndSummary();
+  await testGraphFitButtonTogglesActualAndFitSizing();
+  await testRunStateOverlaysAndStatusContext();
+  await testCancelRunAbortsOpenStream();
+  await testPreviewChangeCancelsActiveRunStream();
   await testRunModeSelectionAndRealModeRejection();
 }
 

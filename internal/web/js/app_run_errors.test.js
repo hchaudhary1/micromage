@@ -10,6 +10,8 @@ function makeElement() {
     disabled: false,
     innerHTML: "",
     listeners: {},
+    scrollHeight: 0,
+    scrollTop: 0,
     textContent: "",
     value: "",
     classList: {
@@ -75,14 +77,18 @@ async function bootHarness(options) {
     "#yaml-editor": makeElement(),
     "#preview-state": makeElement(),
     "#run-button": makeElement(),
+    "#cancel-run-button": makeElement(),
     "#run-arguments": makeElement(),
     "#run-mode": makeElement(),
     "#workflow-summary": makeElement(),
     "#workflow-name": makeElement(),
     "#workflow-description": makeElement(),
+    "#run-status": makeElement(),
     "#issue-counts": makeElement(),
     "#issue-panel": makeElement(),
+    ".graph-wrap": makeElement(),
     "#dag-svg": makeElement(),
+    "#fit-graph-button": makeElement(),
     "#inspector-body": makeElement(),
     "#run-log": makeElement(),
   };
@@ -107,12 +113,14 @@ async function bootHarness(options) {
       }
       throw new Error("unexpected confirm");
     },
+    clearInterval,
     localStorage: { getItem: () => "" },
+    setInterval,
     setTimeout,
   };
   window.MicromageTemplateState = require(appStatePath);
   global.fetch = async (url, requestOptions = {}) => {
-    requests.push({ url, body: requestOptions.body ? JSON.parse(requestOptions.body) : null });
+    requests.push({ url, body: requestOptions.body ? JSON.parse(requestOptions.body) : null, signal: requestOptions.signal });
     if (url === "/api/templates") {
       return response({ body: templates });
     }

@@ -10,6 +10,7 @@ function makeElement(tagName = "div") {
     innerHTML: "",
     listeners: {},
     scrollHeight: 0,
+    scrollLeft: 0,
     scrollTop: 0,
     tagName,
     textContent: "",
@@ -63,14 +64,18 @@ function appElements() {
     "#yaml-editor": makeElement("textarea"),
     "#preview-state": makeElement("span"),
     "#run-button": makeElement("button"),
+    "#cancel-run-button": makeElement("button"),
     "#run-arguments": makeElement("textarea"),
     "#run-mode": makeElement("select"),
     "#workflow-summary": makeElement("div"),
     "#workflow-name": makeElement("h2"),
     "#workflow-description": makeElement("p"),
+    "#run-status": makeElement("p"),
     "#issue-counts": makeElement("div"),
     "#issue-panel": makeElement("div"),
+    ".graph-wrap": makeElement("div"),
     "#dag-svg": makeElement("svg"),
+    "#fit-graph-button": makeElement("button"),
     "#inspector-body": makeElement("div"),
     "#run-log": makeElement("div"),
   };
@@ -129,6 +134,7 @@ async function bootHarness(options = {}) {
   const requests = [];
   const confirms = [];
   const timers = [];
+  const intervals = [];
 
   elements["#run-mode"].value = options.mode || "simulate";
   elements["#run-arguments"].value = options.arguments || "";
@@ -152,15 +158,22 @@ async function bootHarness(options = {}) {
       throw new Error("unexpected confirm");
     },
     localStorage: { getItem: () => "" },
+    clearInterval: (timer) => {
+      intervals[timer - 1] = null;
+    },
     setTimeout: (callback) => {
       timers.push(callback);
       return timers.length;
+    },
+    setInterval: (callback) => {
+      intervals.push(callback);
+      return intervals.length;
     },
   };
   window.MicromageTemplateState = require(appStatePath);
   global.fetch = async (url, requestOptions = {}) => {
     const body = requestOptions.body ? JSON.parse(requestOptions.body) : null;
-    requests.push({ url, body, headers: requestOptions.headers || {} });
+    requests.push({ url, body, headers: requestOptions.headers || {}, signal: requestOptions.signal });
     if (url === "/api/templates") {
       return response({ body: templates });
     }
@@ -170,7 +183,7 @@ async function bootHarness(options = {}) {
     }
     if (url === "/api/run") {
       if (options.runResponseFor) {
-        return options.runResponseFor(body);
+        return options.runResponseFor(body, requestOptions);
       }
       return options.runResponse || streamResponse([]);
     }
@@ -189,7 +202,7 @@ async function bootHarness(options = {}) {
     await flushAsyncWork();
   }
 
-  return { confirms, elements, requests, runPendingTimers };
+  return { confirms, elements, intervals, requests, runPendingTimers };
 }
 
 function runnablePreview(overrides = {}) {
@@ -208,6 +221,7 @@ function logText(elements) {
 
 module.exports = {
   bootHarness,
+  flushAsyncWork,
   logText,
   response,
   runnablePreview,

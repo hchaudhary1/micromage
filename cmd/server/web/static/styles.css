@@ -57,6 +57,18 @@ button:hover {
   filter: brightness(0.95);
 }
 
+#cancel-run-button,
+#fit-graph-button {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+#cancel-run-button:not(:disabled) {
+  border-color: color-mix(in srgb, var(--rose) 36%, var(--line));
+  color: var(--rose);
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -241,6 +253,16 @@ h1 {
   font-size: 0.86rem;
 }
 
+.graph-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#fit-graph-button {
+  min-width: 86px;
+}
+
 .issue-counts {
   display: flex;
   gap: 8px;
@@ -328,6 +350,10 @@ h1 {
   background-size: 34px 34px;
 }
 
+.graph-wrap.fit-to-screen {
+  overflow: hidden;
+}
+
 #dag-svg {
   min-width: 100%;
   min-height: 100%;
@@ -361,6 +387,31 @@ h1 {
 
 .dag-node.has-issues rect:first-child {
   stroke: var(--rose);
+}
+
+.dag-node.run-state-queued rect:first-child {
+  stroke: #98a6b3;
+  stroke-dasharray: 5 4;
+}
+
+.dag-node.run-state-running rect:first-child {
+  stroke: var(--blue);
+  stroke-width: 2;
+}
+
+.dag-node.run-state-succeeded rect:first-child {
+  stroke: var(--green);
+  stroke-width: 2;
+}
+
+.dag-node.run-state-failed rect:first-child {
+  stroke: var(--rose);
+  stroke-width: 2;
+}
+
+.dag-node.run-state-skipped rect:first-child {
+  stroke: var(--amber);
+  stroke-dasharray: 5 4;
 }
 
 .node-stripe {
@@ -403,6 +454,32 @@ h1 {
 .node-badge {
   fill: var(--muted);
   font-size: 10px;
+}
+
+.node-run-state {
+  font-size: 9px;
+  font-weight: 900;
+  text-anchor: end;
+}
+
+.node-run-state-queued {
+  fill: var(--muted);
+}
+
+.node-run-state-running {
+  fill: var(--blue);
+}
+
+.node-run-state-succeeded {
+  fill: var(--green);
+}
+
+.node-run-state-failed {
+  fill: var(--rose);
+}
+
+.node-run-state-skipped {
+  fill: var(--amber);
 }
 
 .bottom-panels {

@@ -44,14 +44,18 @@ async function main() {
     "#yaml-editor": makeElement(),
     "#preview-state": makeElement(),
     "#run-button": makeElement(),
+    "#cancel-run-button": makeElement(),
     "#run-arguments": makeElement(),
     "#run-mode": makeElement(),
     "#workflow-summary": makeElement(),
     "#workflow-name": makeElement(),
     "#workflow-description": makeElement(),
+    "#run-status": makeElement(),
     "#issue-counts": makeElement(),
     "#issue-panel": makeElement(),
+    ".graph-wrap": makeElement(),
     "#dag-svg": makeElement(),
+    "#fit-graph-button": makeElement(),
     "#inspector-body": makeElement(),
     "#run-log": makeElement(),
   };
@@ -68,7 +72,9 @@ async function main() {
     confirm: () => {
       throw new Error("unexpected confirm");
     },
+    clearInterval,
     localStorage: { getItem: () => "" },
+    setInterval,
     setTimeout,
   };
   window.MicromageTemplateState = require("../../../cmd/server/web/static/app_state.js");
