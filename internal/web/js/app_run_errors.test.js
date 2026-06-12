@@ -91,6 +91,7 @@ async function bootHarness(options) {
   const templates = [{ id: "starter", name: "Starter", yaml: options.yaml || "name: starter\nnodes: []\n" }];
   const preview = options.preview || runnablePreview();
   const requests = [];
+  const confirms = [];
 
   global.document = {
     querySelector: (selector) => elements[selector],
@@ -99,7 +100,11 @@ async function bootHarness(options) {
   };
   global.window = {
     clearTimeout,
-    confirm: () => {
+    confirm: (message) => {
+      confirms.push(message);
+      if (Object.hasOwn(options, "confirm")) {
+        return options.confirm;
+      }
       throw new Error("unexpected confirm");
     },
     localStorage: { getItem: () => "" },
@@ -122,7 +127,7 @@ async function bootHarness(options) {
 
   require(appPath);
   await flushAsyncWork();
-  return { elements, requests };
+  return { confirms, elements, requests };
 }
 
 function runnablePreview() {
@@ -131,6 +136,34 @@ function runnablePreview() {
     graph: { edges: [], height: 0, nodes: [], width: 0 },
     issues: [],
     workflow: { name: "Starter", description: "" },
+  };
+}
+
+function runnableRealPreview() {
+  return {
+    can_run: true,
+    graph: {
+      edges: [],
+      height: 0,
+      nodes: [
+        { id: "plan", type: "prompt", label: "Prompt", summary: "Plan", metadata: { provider: "openai", model: "gpt-5" } },
+        { id: "setup", type: "bash", label: "Shell", summary: "echo setup", metadata: {} },
+        { id: "review", type: "command", label: "micromage-code-review-agent", summary: "micromage-code-review-agent", metadata: { provider: "opencode", model: "opencode/nemotron-3-ultra-free" } },
+      ],
+      width: 0,
+    },
+    issues: [],
+    workflow: {
+      name: "Real Review",
+      description: "",
+      provider: "opencode",
+      model: "opencode/nemotron-3-ultra-free",
+      nodes: [
+        { id: "plan", prompt: "Plan", provider: "openai", model: "gpt-5" },
+        { id: "setup", bash: "echo setup" },
+        { id: "review", command: "micromage-code-review-agent" },
+      ],
+    },
   };
 }
 
@@ -158,6 +191,7 @@ async function testInvalidYAMLRendersGlobalWorkflowIssue() {
 async function testDisabledRealModeShowsServerDetail() {
   const { elements } = await bootHarness({
     mode: "real",
+    confirm: true,
     runResponse: response({
       ok: false,
       status: 403,
@@ -170,6 +204,47 @@ async function testDisabledRealModeShowsServerDetail() {
   await elements["#run-button"].listeners.click();
 
   assert.match(logText(elements), /run rejected: real runs require MICROMAGE_ENABLE_REAL_RUNS=1/);
+}
+
+async function testRealModeCancelStopsBeforeRunRequest() {
+  const { confirms, elements, requests } = await bootHarness({
+    mode: "real",
+    preview: runnableRealPreview(),
+    confirm: false,
+  });
+
+  await elements["#run-button"].listeners.click();
+
+  assert.equal(confirms.length, 1);
+  assert.ok(!requests.some((request) => request.url === "/api/run"));
+  assert.match(logText(elements), /real run canceled/);
+  assert.equal(elements["#run-button"].disabled, false);
+}
+
+async function testRealModeConfirmationSummarizesExecutionRisk() {
+  const { confirms, elements } = await bootHarness({
+    mode: "real",
+    preview: runnableRealPreview(),
+    confirm: true,
+    runResponse: response({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      contentType: "text/plain; charset=utf-8",
+      body: "real runs require MICROMAGE_ENABLE_REAL_RUNS=1\n",
+    }),
+  });
+
+  await elements["#run-button"].listeners.click();
+
+  assert.equal(confirms.length, 1);
+  assert.match(confirms[0], /Real run preflight/);
+  assert.match(confirms[0], /Executable node kinds: prompt 1, bash 1, command 1/);
+  assert.match(confirms[0], /Bash\/command nodes: 2 \(bash 1, command 1\)/);
+  assert.match(confirms[0], /Workflow provider\/model: opencode \/ opencode\/nemotron-3-ultra-free/);
+  assert.match(confirms[0], /Node provider\/model overrides: plan: openai \/ gpt-5/);
+  assert.match(confirms[0], /Artifacts: real runs create a repo-local \.micromage\/runs\/<run-id> directory/);
+  assert.match(confirms[0], /Risks: may execute shell commands, send prompts to providers, write artifacts, and modify repository files/);
 }
 
 async function testInvalidModeShowsServerDetail() {
@@ -236,6 +311,8 @@ async function testValidationRejectionRendersPreviewIssues() {
 async function main() {
   await testInvalidYAMLRendersGlobalWorkflowIssue();
   await testDisabledRealModeShowsServerDetail();
+  await testRealModeCancelStopsBeforeRunRequest();
+  await testRealModeConfirmationSummarizesExecutionRisk();
   await testInvalidModeShowsServerDetail();
   await testValidationRejectionRendersPreviewIssues();
 }

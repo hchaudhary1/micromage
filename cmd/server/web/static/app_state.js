@@ -56,6 +56,86 @@
     return `${issueScope(issue)}: ${issue.message}`;
   }
 
+  function realRunPreflightMessage(preview) {
+    // Preflight summaries give operators a compact risk ledger before irreversible real-run effects.
+    const workflow = preview?.workflow || {};
+    const nodes = workflowNodesForPreflight(preview);
+    const kindCounts = countKinds(nodes.map((node) => node.kind));
+    const bashCount = kindCounts.get("bash") || 0;
+    const commandCount = kindCounts.get("command") || 0;
+    const providerOverrides = providerModelOverrides(workflow, nodes);
+
+    return [
+      "Real run preflight",
+      "",
+      `Workflow: ${workflow.name || "Workflow"}`,
+      `Executable node kinds: ${formatKindCounts(kindCounts)}`,
+      `Bash/command nodes: ${bashCount + commandCount} (bash ${bashCount}, command ${commandCount})`,
+      `Workflow provider/model: ${formatProviderModel(workflow.provider, workflow.model)}`,
+      `Node provider/model overrides: ${providerOverrides || "none"}`,
+      "Artifacts: real runs create a repo-local .micromage/runs/<run-id> directory; declared outputs are kept inside that run directory.",
+      "Risks: may execute shell commands, send prompts to providers, write artifacts, and modify repository files.",
+      "",
+      "Start this real run?",
+    ].join("\n");
+  }
+
+  function workflowNodesForPreflight(preview) {
+    const workflowNodes = preview?.workflow?.nodes || [];
+    if (workflowNodes.length) {
+      return workflowNodes.map((node) => ({
+        id: node.id || "node",
+        kind: executableKind(node),
+        provider: node.provider || "",
+        model: node.model || "",
+      }));
+    }
+
+    const graphNodes = preview?.graph?.nodes || [];
+    return graphNodes.map((node) => ({
+      id: node.id || "node",
+      kind: node.type || "unknown",
+      provider: node.metadata?.provider || "",
+      model: node.metadata?.model || "",
+    }));
+  }
+
+  function executableKind(node) {
+    for (const kind of ["command", "prompt", "bash", "script", "loop", "approval", "cancel"]) {
+      if (Object.hasOwn(node, kind)) {
+        return kind;
+      }
+    }
+    return "unknown";
+  }
+
+  function countKinds(kinds) {
+    const counts = new Map();
+    for (const kind of kinds) {
+      counts.set(kind, (counts.get(kind) || 0) + 1);
+    }
+    return counts;
+  }
+
+  function formatKindCounts(counts) {
+    const parts = [];
+    for (const [kind, count] of counts.entries()) {
+      parts.push(`${kind} ${count}`);
+    }
+    return parts.join(", ") || "none";
+  }
+
+  function formatProviderModel(provider, model) {
+    return `${provider || "server default"} / ${model || "server default"}`;
+  }
+
+  function providerModelOverrides(workflow, nodes) {
+    return nodes
+      .filter((node) => node.provider || node.model)
+      .map((node) => `${node.id}: ${formatProviderModel(node.provider || workflow.provider, node.model || workflow.model)}`)
+      .join(", ");
+  }
+
   async function readRunRejection(response) {
     const contentType = response.headers?.get?.("Content-Type") || "";
     if (contentType.includes("application/json")) {
@@ -89,6 +169,7 @@
     hasTemplateDraftEdits,
     issueCounts,
     issueScope,
+    realRunPreflightMessage,
     readRunRejection,
     resolveTemplateChange,
   };

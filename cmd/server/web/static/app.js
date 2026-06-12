@@ -219,6 +219,11 @@ function renderInspector() {
 }
 
 async function runWorkflow() {
+  if (runMode.value === "real" && !confirmRealRunPreflight()) {
+    appendLog("real run canceled");
+    runButton.disabled = !currentPreview?.can_run;
+    return;
+  }
   runButton.disabled = true;
   runLog.textContent = "";
   appendLog("opening run stream");
@@ -261,6 +266,11 @@ async function runWorkflow() {
     }
   }
   runButton.disabled = !currentPreview?.can_run;
+}
+
+function confirmRealRunPreflight() {
+  // Real-run confirmation makes local execution and artifact side effects explicit before they start.
+  return window.confirm(appState.realRunPreflightMessage(currentPreview));
 }
 
 function runRequestHeaders() {
