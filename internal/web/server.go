@@ -228,23 +228,49 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	runStarted := time.Now()
 	s.logWorkflowStart(mode, logRunID)
-	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
+	err := workflow.Execute(r.Context(), preview.Workflow, runner, emit)
+	var summaryEvent workflow.RunEvent
+	if summary != nil {
+		summaryEvent = summary.event()
+	}
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			s.logWorkflowFinish("workflow_interrupted", mode, logRunID, "interrupted", runStarted, publicFailureReason(err))
+			s.persistRunArtifacts(cwd, request.YAML, workflowIDForRun(preview.Workflow, runID), summaryEvent)
 			s.persistRunInterruption(runStore, runID, publicFailureReason(err))
 			_ = emit(workflow.RunEvent{Type: "workflow_interrupted", Message: err.Error()})
 		} else {
 			s.logWorkflowFinish("workflow_failed", mode, logRunID, "failed", runStarted, publicFailureReason(err))
+			s.persistRunArtifacts(cwd, request.YAML, workflowIDForRun(preview.Workflow, runID), summaryEvent)
 			s.persistRunFailure(runStore, runID, lifecycle, publicFailureReason(err))
 			_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
 		}
 	} else {
 		s.logWorkflowFinish("workflow_complete", mode, logRunID, "success", runStarted, "")
+		s.persistRunArtifacts(cwd, request.YAML, workflowIDForRun(preview.Workflow, runID), summaryEvent)
 		s.persistRunFinish(runStore, runID, lifecycle)
 	}
 	if summary != nil {
 		// Real-run summaries keep artifact evidence visible without shell inspection.
-		_ = emit(summary.event())
+		_ = emit(summaryEvent)
+	}
+}
+
+func (s *Server) persistRunArtifacts(cwd string, workflowYAML string, workflowID string, summary workflow.RunEvent) {
+	if summary.Type == "" {
+		return
+	}
+	// Real-run snapshots preserve the artifact audit trail after the browser stream is gone.
+	if err := workflow.WriteRunArtifactManifest(workflow.RunArtifactManifestWrite{
+		RepoRoot:     cwd,
+		RunID:        summary.RunID,
+		WorkflowID:   workflowID,
+		ArtifactsDir: summary.ArtifactsDir,
+		WorkflowYAML: workflowYAML,
+		Summary:      summary,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		s.logJSON(map[string]any{"event": "run_artifact_manifest_failed", "run_id": summary.RunID, "error": publicFailureReason(err)})
 	}
 }
 
@@ -610,23 +636,5 @@ func (summary *realRunSummary) event() workflow.RunEvent {
 }
 
 func (summary *realRunSummary) generatedArtifacts() []workflow.RunArtifact {
-	var artifacts []workflow.RunArtifact
-	for _, node := range summary.workflow.Nodes {
-		for _, pattern := range node.Outputs {
-			path, err := summary.resolveOutputPath(pattern)
-			if err != nil {
-				continue
-			}
-			if info, err := os.Stat(path); err == nil && !info.IsDir() {
-				artifacts = append(artifacts, workflow.RunArtifact{NodeID: node.ID, Path: path})
-			}
-		}
-	}
-	return artifacts
-}
-
-func (summary *realRunSummary) resolveOutputPath(pattern string) (string, error) {
-	path := strings.ReplaceAll(pattern, "$ARTIFACTS_DIR", summary.artifactsDir)
-	path = strings.ReplaceAll(path, "$WORKFLOW_ID", summary.runID)
-	return workflow.ResolveDeclaredArtifactPath(path, summary.artifactsDir)
+	return workflow.CollectDeclaredArtifacts(summary.workflow, summary.artifactsDir, summary.runID)
 }

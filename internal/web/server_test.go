@@ -816,6 +816,45 @@ nodes:
 	if !strings.Contains(string(eventsData), `"type":"run_started"`) || !strings.Contains(string(eventsData), `"type":"run_failed"`) {
 		t.Fatalf("expected durable lifecycle events, got %q", string(eventsData))
 	}
+	manifestPath := filepath.Join(dir, ".micromage", "runs", "run-summary", "manifest.json")
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("expected artifact manifest: %v", err)
+	}
+	var manifest workflow.ArtifactManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatalf("decode artifact manifest: %v", err)
+	}
+	if manifest.RunID != "run-summary" || manifest.WorkflowID != "real-summary" {
+		t.Fatalf("unexpected artifact manifest metadata: %#v", manifest)
+	}
+	if len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Path != filepath.ToSlash(filepath.Join("review", "finding.md")) || manifest.Artifacts[0].SizeBytes != int64(len("finding")) {
+		t.Fatalf("unexpected manifest artifacts: %#v", manifest.Artifacts)
+	}
+	if manifest.Artifacts[0].SHA256 == "" {
+		t.Fatalf("expected artifact hash in manifest: %#v", manifest.Artifacts[0])
+	}
+	if len(manifest.CompletedNodes) != 1 || manifest.CompletedNodes[0] != "write-review" || len(manifest.FailedNodes) != 1 || manifest.FailedNodes[0].NodeID != "fail-review" {
+		t.Fatalf("unexpected manifest node status: %#v", manifest)
+	}
+	workflowSnapshot, err := os.ReadFile(filepath.Join(dir, ".micromage", "runs", "run-summary", "workflow.yaml"))
+	if err != nil {
+		t.Fatalf("expected workflow snapshot: %v", err)
+	}
+	if string(workflowSnapshot) != input {
+		t.Fatalf("unexpected workflow snapshot: %q", string(workflowSnapshot))
+	}
+	summaryData, err := os.ReadFile(filepath.Join(dir, ".micromage", "runs", "run-summary", "summary.json"))
+	if err != nil {
+		t.Fatalf("expected summary snapshot: %v", err)
+	}
+	var persistedSummary workflow.RunEvent
+	if err := json.Unmarshal(summaryData, &persistedSummary); err != nil {
+		t.Fatalf("decode persisted run summary: %v", err)
+	}
+	if persistedSummary.RunID != "run-summary" || !eventHasArtifact(persistedSummary, "write-review", artifactPath) {
+		t.Fatalf("unexpected persisted run summary: %#v", persistedSummary)
+	}
 }
 
 func TestRealRunSummaryRejectsArtifactsOutsideRunDirectory(t *testing.T) {
