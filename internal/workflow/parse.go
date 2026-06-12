@@ -1,12 +1,26 @@
 package workflow
 
 import (
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const nodeIDPattern = "[A-Za-z0-9][A-Za-z0-9_-]*"
+
+var workflowFields = []string{"description", "interactive", "model", "name", "nodes", "provider", "tags", "worktree"}
+var nodeFields = []string{"agent", "allowed_tools", "approval", "bash", "cancel", "command", "context", "depends_on", "hooks", "id", "idle_timeout", "loop", "mcp", "model", "outputs", "prompt", "provider", "retry", "script", "skills", "timeout", "trigger_rule", "when"}
+var commonWorkflowFieldTypos = map[string]string{
+	"descripton": "description",
+}
+var commonNodeFieldTypos = map[string]string{
+	"depend_on":   "depends_on",
+	"dependsOn":   "depends_on",
+	"modle":       "model",
+	"output":      "outputs",
+	"triggerRule": "trigger_rule",
+}
 
 func ParseYAML(input string) (Workflow, []Issue) {
 	var workflow Workflow
@@ -22,6 +36,7 @@ func ParseYAML(input string) (Workflow, []Issue) {
 func Validate(workflow Workflow) []Issue {
 	var issues []Issue
 	issues = append(issues, workflow.InvalidTypes...)
+	issues = append(issues, unknownFieldWarnings(workflow.Extra, "", "workflow", workflowFields, commonWorkflowFieldTypos)...)
 	if workflow.Name == "" {
 		issues = append(issues, Issue{Level: IssueError, Field: "name", Message: "name is required"})
 	}
@@ -36,6 +51,7 @@ func Validate(workflow Workflow) []Issue {
 	normalizedEnvIDs := map[string]string{}
 	for _, node := range workflow.Nodes {
 		issues = append(issues, node.typeIssues...)
+		issues = append(issues, unknownFieldWarnings(node.Extra, node.ID, "node", nodeFields, commonNodeFieldTypos)...)
 		if node.ID == "" {
 			issues = append(issues, Issue{Level: IssueError, Field: "id", Message: "node id is required"})
 			continue
@@ -76,6 +92,97 @@ func Validate(workflow Workflow) []Issue {
 		issues = append(issues, Issue{Level: IssueWarning, Field: "runtime", Message: "runtime fields are displayed but not executed in v1"})
 	}
 	return issues
+}
+
+func unknownFieldWarnings(extra map[string]any, nodeID string, scope string, candidates []string, commonTypos map[string]string) []Issue {
+	if len(extra) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(extra))
+	for field := range extra {
+		if isExtensionField(field) {
+			continue
+		}
+		keys = append(keys, field)
+	}
+	sort.Strings(keys)
+
+	issues := make([]Issue, 0, len(keys))
+	for _, field := range keys {
+		message := "unknown " + scope + " field. Rename it or prefix it with x_ for intentional extension metadata."
+		if suggestion := suggestField(field, candidates, commonTypos); suggestion != "" {
+			message = "unknown " + scope + " field. Did you mean " + suggestion + "? Rename it or prefix it with x_ for intentional extension metadata."
+		}
+		issues = append(issues, Issue{Level: IssueWarning, NodeID: nodeID, Field: field, Message: message})
+	}
+	return issues
+}
+
+func isExtensionField(field string) bool {
+	// Extension-prefixed fields let teams preserve integration metadata without typo-warning noise.
+	return strings.HasPrefix(field, "x_")
+}
+
+func suggestField(field string, candidates []string, commonTypos map[string]string) string {
+	if suggestion, ok := commonTypos[field]; ok {
+		return suggestion
+	}
+	normalizedField := normalizeFieldName(field)
+	for _, candidate := range candidates {
+		if normalizedField == normalizeFieldName(candidate) && field != candidate {
+			return candidate
+		}
+	}
+	for _, candidate := range candidates {
+		if editDistance(normalizedField, normalizeFieldName(candidate)) <= 1 {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func normalizeFieldName(field string) string {
+	var out strings.Builder
+	for _, char := range field {
+		if char == '_' || char == '-' {
+			continue
+		}
+		out.WriteRune(char)
+	}
+	return strings.ToLower(out.String())
+}
+
+func editDistance(left string, right string) int {
+	if left == right {
+		return 0
+	}
+	previous := make([]int, len(right)+1)
+	for index := range previous {
+		previous[index] = index
+	}
+	for i := 1; i <= len(left); i++ {
+		current := make([]int, len(right)+1)
+		current[0] = i
+		for j := 1; j <= len(right); j++ {
+			cost := 1
+			if left[i-1] == right[j-1] {
+				cost = 0
+			}
+			current[j] = minInt(current[j-1]+1, previous[j]+1, previous[j-1]+cost)
+		}
+		previous = current
+	}
+	return previous[len(right)]
+}
+
+func minInt(first int, rest ...int) int {
+	minimum := first
+	for _, value := range rest {
+		if value < minimum {
+			minimum = value
+		}
+	}
+	return minimum
 }
 
 func validNodeID(id string) bool {

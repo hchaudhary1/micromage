@@ -248,11 +248,91 @@ nodes:
 	}
 }
 
+func TestParseYAMLWarnsOnUnknownRootFieldsWithSuggestions(t *testing.T) {
+	workflow, issues := ParseYAML(`name: typo-root
+descripton: typo root field
+nodes:
+  - id: build
+    command: build
+`)
+
+	if !containsIssue(issues, "description") {
+		t.Fatalf("expected missing description issue, got %#v", issues)
+	}
+	if !containsIssueWithLevel(issues, IssueWarning, "", "descripton", "Did you mean description?") {
+		t.Fatalf("expected root unknown field suggestion warning, got %#v", issues)
+	}
+	if workflow.Extra["descripton"] != "typo root field" {
+		t.Fatalf("expected unknown root field to be preserved, got %#v", workflow.Extra)
+	}
+}
+
+func TestParseYAMLWarnsOnUnknownNodeFieldsWithSuggestions(t *testing.T) {
+	workflow, issues := ParseYAML(`name: typo-node
+description: typo node fields
+nodes:
+  - id: build
+    command: build
+    triggerRule: all_done
+    output:
+      - artifact.txt
+    depend_on: [plan]
+    dependsOn: [plan]
+    modle: medium
+`)
+
+	if HasErrors(issues) {
+		t.Fatalf("expected warnings only, got %#v", issues)
+	}
+	for _, tc := range []struct {
+		field   string
+		message string
+	}{
+		{field: "triggerRule", message: "Did you mean trigger_rule?"},
+		{field: "output", message: "Did you mean outputs?"},
+		{field: "depend_on", message: "Did you mean depends_on?"},
+		{field: "dependsOn", message: "Did you mean depends_on?"},
+		{field: "modle", message: "Did you mean model?"},
+	} {
+		if !containsIssueWithLevel(issues, IssueWarning, "build", tc.field, tc.message) {
+			t.Fatalf("expected node warning for %s, got %#v", tc.field, issues)
+		}
+	}
+	if len(workflow.Nodes) != 1 || workflow.Nodes[0].Extra["triggerRule"] != "all_done" || workflow.Nodes[0].Extra["modle"] != "medium" {
+		t.Fatalf("expected unknown node fields to be preserved, got %#v", workflow.Nodes)
+	}
+}
+
+func TestParseYAMLPreservesExtensionFieldsWithoutWarnings(t *testing.T) {
+	workflow, issues := ParseYAML(`name: extension
+description: extension fields
+x_owner: team-workflows
+nodes:
+  - id: build
+    command: build
+    x_reviewers:
+      - qa
+`)
+
+	if HasErrors(issues) {
+		t.Fatalf("expected no errors, got %#v", issues)
+	}
+	if containsIssue(issues, "x_owner") || containsIssue(issues, "x_reviewers") {
+		t.Fatalf("expected x_ extension fields to avoid warnings, got %#v", issues)
+	}
+	if workflow.Extra["x_owner"] != "team-workflows" {
+		t.Fatalf("expected extension root field to be preserved, got %#v", workflow.Extra)
+	}
+	if reviewers, ok := workflow.Nodes[0].Extra["x_reviewers"].([]any); !ok || len(reviewers) != 1 || reviewers[0] != "qa" {
+		t.Fatalf("expected extension node field to be preserved, got %#v", workflow.Nodes[0].Extra)
+	}
+}
+
 func TestParseYAMLPreservesUnknownFieldsAndRuntimeWarnings(t *testing.T) {
 	workflow, issues := ParseYAML(`name: runtime
 description: runtime fields
 provider: local
-custom_root: true
+x_custom_root: true
 nodes:
   - id: build
     command: build
@@ -261,7 +341,7 @@ nodes:
     skills: ["review", " review "]
     hooks:
       before: echo before
-    custom_node: value
+    x_custom_node: value
 `)
 
 	if HasErrors(issues) {
@@ -270,7 +350,7 @@ nodes:
 	if !containsIssue(issues, "runtime") {
 		t.Fatalf("expected runtime warning, got %#v", issues)
 	}
-	if workflow.Extra["custom_root"] != true || workflow.Nodes[0].Extra["custom_node"] != "value" {
+	if workflow.Extra["x_custom_root"] != true || workflow.Nodes[0].Extra["x_custom_node"] != "value" {
 		t.Fatalf("expected unknown fields to be preserved, got %#v %#v", workflow.Extra, workflow.Nodes[0].Extra)
 	}
 	if got := strings.Join(workflow.Nodes[0].Skills, ","); got != "review,review" {
@@ -1343,6 +1423,15 @@ func TestOpenCodeProviderSmokeOptIn(t *testing.T) {
 func containsIssue(issues []Issue, field string) bool {
 	for _, issue := range issues {
 		if issue.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIssueWithLevel(issues []Issue, level string, nodeID string, field string, message string) bool {
+	for _, issue := range issues {
+		if issue.Level == level && issue.NodeID == nodeID && issue.Field == field && strings.Contains(issue.Message, message) {
 			return true
 		}
 	}

@@ -212,6 +212,7 @@ The serialization can be revisited if OpenCode adds documented per-run storage i
 - Keep the app Go-first and dependency-light.
 - Avoid NPM dependencies at all costs.
 - Golang libraries are allowed when they fit the project.
+- Unknown workflow and node fields are surfaced as parser warnings; prefix intentional extension metadata with `x_` to preserve it without warning noise.
 - Persistence design lives in [docs/persistence-design.md](docs/persistence-design.md).
 - Add or update tests with each feature change.
 - Maintain at least 70% total coverage.
