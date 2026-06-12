@@ -77,6 +77,8 @@ Micromage currently deploys as a single Go server binary with embedded web asset
 
 Review [SECURITY.md](SECURITY.md) and [docs/operator-security.md](docs/operator-security.md) before exposing Micromage beyond a local trusted workstation or enabling real workflow execution.
 
+Workflow YAML authoring semantics live in [docs/workflow-authoring.md](docs/workflow-authoring.md).
+
 Run the opt-in local OpenCode smoke test:
 
 ```sh
