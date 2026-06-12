@@ -62,6 +62,12 @@ Then CI runs:
 "$(go env GOPATH)/bin/govulncheck" ./...
 ```
 
+## Release And Deployment
+
+Micromage currently deploys as a single Go server binary with embedded web assets. The initial manual release path, package commands, checksums, systemd example, and runtime environment guidance live in [docs/release.md](docs/release.md).
+
+Review [SECURITY.md](SECURITY.md) and [docs/operator-security.md](docs/operator-security.md) before exposing Micromage beyond a local trusted workstation or enabling real workflow execution.
+
 Run the opt-in local OpenCode smoke test:
 
 ```sh
@@ -97,6 +103,7 @@ cmd/server/web/commands/       Embedded command prompt Markdown assets
 internal/workflow/             YAML parsing, validation, layout, templates, commands, and runners
 internal/web/                  HTTP handlers and tests
 docs/                          Design notes for production persistence and operations
+SECURITY.md                    Security reporting policy and operator baseline
 .githooks/                     Tracked Git hooks
 ```
 
@@ -214,6 +221,7 @@ The serialization can be revisited if OpenCode adds documented per-run storage i
 - Golang libraries are allowed when they fit the project.
 - Unknown workflow and node fields are surfaced as parser warnings; prefix intentional extension metadata with `x_` to preserve it without warning noise.
 - Persistence design lives in [docs/persistence-design.md](docs/persistence-design.md).
+- Release and operator security guidance lives in [docs/release.md](docs/release.md) and [docs/operator-security.md](docs/operator-security.md).
 - Add or update tests with each feature change.
 - Maintain at least 70% total coverage.
 - Leave short comments for business intent when adding non-obvious code paths.
