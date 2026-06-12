@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"micromage/internal/workflow"
@@ -17,6 +19,8 @@ type Server struct {
 	workflowTemplates []workflow.Template
 	commands          workflow.CommandRegistry
 	mux               *http.ServeMux
+	workingDirectory  func() string
+	nextRunID         func() string
 }
 
 func NewServer(assets fs.FS) (*Server, error) {
@@ -44,6 +48,8 @@ func NewServer(assets fs.FS) (*Server, error) {
 		workflowTemplates: workflowTemplates,
 		commands:          workflow.NewCommandRegistry(commands),
 		mux:               http.NewServeMux(),
+		workingDirectory:  mustGetwd,
+		nextRunID:         func() string { return "run-" + strconv.FormatInt(time.Now().UnixNano(), 10) },
 	}
 
 	server.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
@@ -134,14 +140,29 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runner := workflow.NodeRunner(workflow.LoggingRunner{})
+	var summary *realRunSummary
 	if mode == "real" {
-		runID := "run-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		cwd := mustGetwd()
-		runner = workflow.NewRealRunner(realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID))
+		runID := s.nextRunID()
+		cwd := s.workingDirectory()
+		config := realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID)
+		summary = newRealRunSummary(preview.Workflow, cwd, config.ArtifactsDir, runID)
+		runner = workflow.NewRealRunner(config)
+	}
+
+	if summary != nil {
+		emitRaw := emit
+		emit = func(event workflow.RunEvent) error {
+			summary.observe(event)
+			return emitRaw(event)
+		}
 	}
 
 	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
 		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
+	}
+	if summary != nil {
+		// Real-run summaries keep artifact evidence visible without shell inspection.
+		_ = emit(summary.event())
 	}
 }
 
@@ -195,4 +216,65 @@ func mustGetwd() string {
 		return "."
 	}
 	return cwd
+}
+
+type realRunSummary struct {
+	workflow     workflow.Workflow
+	cwd          string
+	artifactsDir string
+	runID        string
+	completed    []string
+	failures     []workflow.RunFailure
+}
+
+func newRealRunSummary(parsed workflow.Workflow, cwd string, artifactsDir string, runID string) *realRunSummary {
+	return &realRunSummary{
+		workflow:     parsed,
+		cwd:          cwd,
+		artifactsDir: artifactsDir,
+		runID:        runID,
+	}
+}
+
+func (summary *realRunSummary) observe(event workflow.RunEvent) {
+	switch event.Type {
+	case "node_complete":
+		summary.completed = append(summary.completed, event.NodeID)
+	case "node_failed":
+		summary.failures = append(summary.failures, workflow.RunFailure{NodeID: event.NodeID, Message: event.Message})
+	}
+}
+
+func (summary *realRunSummary) event() workflow.RunEvent {
+	return workflow.RunEvent{
+		Type:           "run_summary",
+		Message:        "run artifacts: " + summary.artifactsDir,
+		RunID:          summary.runID,
+		ArtifactsDir:   summary.artifactsDir,
+		Artifacts:      summary.generatedArtifacts(),
+		CompletedNodes: append([]string(nil), summary.completed...),
+		FailedNodes:    append([]workflow.RunFailure(nil), summary.failures...),
+	}
+}
+
+func (summary *realRunSummary) generatedArtifacts() []workflow.RunArtifact {
+	var artifacts []workflow.RunArtifact
+	for _, node := range summary.workflow.Nodes {
+		for _, pattern := range node.Outputs {
+			path := summary.resolveOutputPath(pattern)
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				artifacts = append(artifacts, workflow.RunArtifact{NodeID: node.ID, Path: path})
+			}
+		}
+	}
+	return artifacts
+}
+
+func (summary *realRunSummary) resolveOutputPath(pattern string) string {
+	path := strings.ReplaceAll(pattern, "$ARTIFACTS_DIR", summary.artifactsDir)
+	path = strings.ReplaceAll(path, "$WORKFLOW_ID", summary.runID)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(summary.cwd, path)
+	}
+	return path
 }

@@ -8,10 +8,25 @@ import (
 )
 
 type RunEvent struct {
-	Type    string `json:"type"`
+	Type           string        `json:"type"`
+	Message        string        `json:"message"`
+	NodeID         string        `json:"node_id,omitempty"`
+	Layer          int           `json:"layer,omitempty"`
+	RunID          string        `json:"run_id,omitempty"`
+	ArtifactsDir   string        `json:"artifacts_dir,omitempty"`
+	Artifacts      []RunArtifact `json:"artifacts,omitempty"`
+	CompletedNodes []string      `json:"completed_nodes,omitempty"`
+	FailedNodes    []RunFailure  `json:"failed_nodes,omitempty"`
+}
+
+type RunArtifact struct {
+	NodeID string `json:"node_id"`
+	Path   string `json:"path"`
+}
+
+type RunFailure struct {
+	NodeID  string `json:"node_id"`
 	Message string `json:"message"`
-	NodeID  string `json:"node_id,omitempty"`
-	Layer   int    `json:"layer,omitempty"`
 }
 
 type EventSink func(RunEvent) error

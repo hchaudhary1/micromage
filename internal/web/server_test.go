@@ -299,6 +299,53 @@ func TestRunEndpointRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestRealRunEndpointStreamsArtifactsAndFailureSummary(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	server.nextRunID = func() string { return "run-summary" }
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-summary", "review", "finding.md")
+	input := `name: real-summary
+description: real summary
+nodes:
+  - id: write-review
+    bash: |
+      mkdir -p "$ARTIFACTS_DIR/review"
+      printf "finding" > "$ARTIFACTS_DIR/review/finding.md"
+    outputs:
+      - $ARTIFACTS_DIR/review/finding.md
+  - id: fail-review
+    bash: exit 7
+`
+
+	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
+	}
+	events := decodeSSEEvents(t, response)
+	summary, ok := findRunEvent(events, "run_summary")
+	if !ok {
+		t.Fatalf("expected run_summary event, got %#v", events)
+	}
+	if summary.RunID != "run-summary" || summary.ArtifactsDir != filepath.Join(dir, ".micromage", "runs", "run-summary") {
+		t.Fatalf("unexpected run metadata: %#v", summary)
+	}
+	if !eventHasCompletedNode(summary, "write-review") {
+		t.Fatalf("expected completed node in summary: %#v", summary)
+	}
+	if !eventHasFailedNode(summary, "fail-review") {
+		t.Fatalf("expected failed node in summary: %#v", summary)
+	}
+	if !eventHasArtifact(summary, "write-review", artifactPath) {
+		t.Fatalf("expected generated artifact in summary: %#v", summary)
+	}
+	if _, ok := findRunEvent(events, "workflow_failed"); !ok {
+		t.Fatalf("expected workflow_failed event, got %#v", events)
+	}
+}
+
 func TestRealRunnerConfigUsesRepoLocalArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	config := realRunnerConfig(workflow.CommandRegistry{}, workflow.Workflow{Provider: "opencode", Model: "model"}, yamlRequest{Arguments: "review"}, dir, "run-1")
@@ -334,6 +381,60 @@ func postRaw(handler http.Handler, path string, body string) *httptest.ResponseR
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func decodeSSEEvents(t *testing.T, response *httptest.ResponseRecorder) []workflow.RunEvent {
+	t.Helper()
+	var events []workflow.RunEvent
+	for _, chunk := range strings.Split(response.Body.String(), "\n\n") {
+		for _, line := range strings.Split(chunk, "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var event workflow.RunEvent
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+				t.Fatalf("decode SSE event %q: %v", line, err)
+			}
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func findRunEvent(events []workflow.RunEvent, eventType string) (workflow.RunEvent, bool) {
+	for _, event := range events {
+		if event.Type == eventType {
+			return event, true
+		}
+	}
+	return workflow.RunEvent{}, false
+}
+
+func eventHasCompletedNode(event workflow.RunEvent, nodeID string) bool {
+	for _, completed := range event.CompletedNodes {
+		if completed == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func eventHasFailedNode(event workflow.RunEvent, nodeID string) bool {
+	for _, failure := range event.FailedNodes {
+		if failure.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func eventHasArtifact(event workflow.RunEvent, nodeID string, path string) bool {
+	for _, artifact := range event.Artifacts {
+		if artifact.NodeID == nodeID && artifact.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func previewContainsIssue(preview workflow.Preview, field string) bool {

@@ -404,6 +404,14 @@ h1 {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+.log-detail {
+  color: #a9c6d7;
+}
+
+.log-error {
+  color: #ffb7c2;
+}
+
 @media (max-width: 900px) {
   .topbar {
     align-items: stretch;

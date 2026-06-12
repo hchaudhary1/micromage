@@ -157,7 +157,11 @@ async function runWorkflow() {
   const response = await fetch("/api/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ yaml: yamlEditor.value }),
+    body: JSON.stringify({
+      yaml: yamlEditor.value,
+      arguments: runArguments.value,
+      mode: runMode.value,
+    }),
   });
   if (!response.ok) {
     appendLog("run rejected");
@@ -178,15 +182,36 @@ async function runWorkflow() {
       const dataLine = chunk.split("\n").find((line) => line.startsWith("data: "));
       if (!dataLine) continue;
       const event = JSON.parse(dataLine.slice(6));
-      appendLog(event.message);
+      appendRunEvent(event);
     }
   }
   runButton.disabled = !currentPreview?.can_run;
 }
 
-function appendLog(message) {
+function appendRunEvent(event) {
+  appendLog(event.message, event.type === "node_failed" || event.type === "workflow_failed" ? "log-error" : "");
+  if (event.type === "run_summary") {
+    appendRunSummary(event);
+  }
+}
+
+function appendRunSummary(event) {
+  appendLog(`Run ID: ${event.run_id || "unknown"}`, "log-detail");
+  appendLog(`Run directory: ${event.artifacts_dir || "not available"}`, "log-detail");
+  appendLog(`Completed nodes: ${(event.completed_nodes || []).join(", ") || "none"}`, "log-detail");
+  const failures = (event.failed_nodes || []).map((failure) => `${failure.node_id}: ${failure.message}`);
+  appendLog(`Failed nodes: ${failures.join(" | ") || "none"}`, failures.length ? "log-error" : "log-detail");
+  for (const artifact of event.artifacts || []) {
+    appendLog(`Artifact ${artifact.node_id}: ${artifact.path}`, "log-detail");
+  }
+}
+
+function appendLog(message, className = "") {
   const line = document.createElement("div");
   line.textContent = message;
+  if (className) {
+    line.className = className;
+  }
   runLog.appendChild(line);
   runLog.scrollTop = runLog.scrollHeight;
 }
