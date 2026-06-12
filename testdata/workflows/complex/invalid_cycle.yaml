@@ -1,0 +1,10 @@
+name: invalid cycle fixture
+nodes:
+  first:
+    type: command
+    command: echo first
+    depends_on: [second]
+  second:
+    type: command
+    command: echo second
+    depends_on: [first]

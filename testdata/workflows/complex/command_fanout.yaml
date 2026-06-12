@@ -1,0 +1,18 @@
+name: command fanout fixture
+description: Exercises command, bash, agent-template, and fanout dependencies.
+provider: opencode
+model: opencode/deepseek-v4-flash-free
+nodes:
+  - id: inspect
+    command: inspect-repo
+    timeout: 30000
+  - id: unit_checks
+    bash: go test ./...
+    depends_on: [inspect]
+  - id: style_checks
+    type: command
+    command: gofmt -w .
+    depends_on: [inspect]
+  - id: summarize
+    prompt: Summarize $ARGUMENTS after checks pass.
+    depends_on: [unit_checks, style_checks]

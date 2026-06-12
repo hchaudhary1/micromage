@@ -1,0 +1,15 @@
+name: human gate fixture
+description: Verifies approval nodes pause risky follow-up work.
+interactive: true
+nodes:
+  review:
+    prompt: Review the proposed migration plan.
+  approve_release:
+    approval:
+      message: Confirm release steps can continue.
+      capture_response: true
+    depends_on: [review]
+  publish_notes:
+    type: command
+    command: echo release notes ready
+    depends_on: [approve_release]

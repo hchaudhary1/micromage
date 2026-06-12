@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+repo="$(git rev-parse --show-toplevel)"
+threshold="${MICROMAGE_COVERAGE_THRESHOLD:-70}"
+
+cd "$repo"
+
+if [ -n "${MICROMAGE_BIN:-}" ]; then
+	# Delegate to one quality command so local commits and CI smoke tests enforce the same policy.
+	exec "$MICROMAGE_BIN" quality pre-commit --repo "$repo" --threshold "$threshold"
+fi
+
+if command -v micromage >/dev/null 2>&1; then
+	exec micromage quality pre-commit --repo "$repo" --threshold "$threshold"
+fi
+
+exec go run ./cmd/micromage quality pre-commit --repo "$repo" --threshold "$threshold"

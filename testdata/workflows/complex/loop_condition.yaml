@@ -1,0 +1,21 @@
+name: loop condition fixture
+description: Covers loop completion, trigger rules, JSON output conditions, and skipped branches.
+nodes:
+  draft:
+    prompt: Return {"status":"ready"} when the draft is complete.
+  verify:
+    loop:
+      prompt: Check the draft and print COMPLETE when acceptable.
+      until: COMPLETE
+      max_iterations: 2
+    depends_on: [draft]
+  report:
+    type: command
+    command: echo report-ready
+    depends_on: [verify]
+    when: $draft.output.status == 'ready'
+  notify:
+    type: command
+    command: echo notify
+    trigger_rule: one_success
+    depends_on: [verify, report]

@@ -1,0 +1,15 @@
+name: smoke
+nodes:
+  inspect:
+    type: command
+    command: echo inspecting workspace
+  test:
+    type: command
+    command: go test ./...
+    timeout: 2m
+    depends_on: [inspect]
+  review:
+    type: human_gate
+    message: Review the test output before continuing.
+    depends_on: [test]
+

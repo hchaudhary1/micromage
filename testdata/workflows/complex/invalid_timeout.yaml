@@ -1,0 +1,6 @@
+name: invalid timeout fixture
+nodes:
+  test:
+    type: command
+    command: echo test
+    timeout: eventually

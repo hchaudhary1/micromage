@@ -1,0 +1,6 @@
+name: invalid dependency fixture
+nodes:
+  test:
+    type: command
+    command: echo test
+    depends_on: [missing_setup]
