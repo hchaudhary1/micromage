@@ -103,13 +103,67 @@ Real execution is opt-in because workflows can modify files, create commits, pus
 MICROMAGE_ENABLE_REAL_RUNS=1 go run ./cmd/server
 ```
 
-Then call `/api/run` with `mode: "real"` and optional `arguments`. OpenCode runs use:
+Then choose **Real** in the run mode selector or call `/api/run` with `mode: "real"` and optional `arguments`. OpenCode runs use:
 
 ```text
 opencode run --model opencode/nemotron-3-ultra-free --format json --dir <repo> <prompt>
 ```
 
 Set `MICROMAGE_OPENCODE_UNSAFE=1` only when you intentionally want Micromage to append OpenCode's `--dangerously-skip-permissions` flag.
+
+### Running `review-last-commit`
+
+The embedded `review-last-commit` workflow is intended to review the current `HEAD` commit against the local repository state.
+
+1. Start the server with real runs enabled.
+2. Select the `review-last-commit` template.
+3. Set run mode to `Real`.
+4. Optionally enter review instructions in the input field.
+5. Run the workflow and watch the run log for completed nodes, failed nodes, generated artifact paths, and the run directory.
+
+The workflow first writes shared Git context, then runs parallel reviewer prompts through OpenCode, then synthesizes any successful reviewer output. If every reviewer fails, synthesis is skipped and the stream ends with a failure event.
+
+### Artifact Lifecycle
+
+Every real run gets a repo-local directory:
+
+```text
+.micromage/runs/<run-id>
+```
+
+`review-last-commit` stores its files under:
+
+```text
+.micromage/runs/<run-id>/review-last-commit/
+```
+
+Important files include:
+
+- `context.md` and `context.json` from the setup node
+- `*-findings.md` from each reviewer node
+- `consolidated-review.md` from the synthesis node
+
+Prompt and command nodes can declare `outputs`. When a provider writes the declared file, Micromage uses that file as the node output for downstream `$node.output` substitutions. When a provider succeeds but only returns text, a single declared output is materialized from that text. If the provider stream fails or event emission fails, partial text is not published downstream and is not materialized as a successful artifact.
+
+The run stream emits a final `run_summary` event for real runs. It includes the run ID, artifact directory, generated declared outputs, completed nodes, and failed node reasons. The UI renders the same summary in the run log.
+
+### Timeouts And Partial Failures
+
+Nodes can set `timeout` in seconds or `idle_timeout` in milliseconds. OpenCode-backed nodes apply those limits to the provider process so stuck runs fail and emit a node failure instead of hanging indefinitely.
+
+Parallel review workflows can tolerate partial failure when a downstream node uses `trigger_rule: one_success`. In that case synthesis runs when at least one dependency succeeds. Failed reviewers are still reported in the run summary so their errors are visible without manually inspecting SSE logs.
+
+### OpenCode Concurrency
+
+Micromage currently serializes OpenCode provider calls. OpenCode `1.16.2` reports a single local database at:
+
+```text
+~/.local/share/opencode/opencode.db
+```
+
+`opencode run --help` exposes session, attach, and port options, but not a per-run database path or another stable isolation control. Earlier parallel provider calls hit SQLite `database is locked` failures, so the supported model is concurrent workflow scheduling with serialized OpenCode execution inside each Micromage server process.
+
+The serialization can be revisited if OpenCode adds documented per-run storage isolation, or if Micromage switches to a long-lived `opencode serve` integration that proves safe concurrent request handling against the shared database.
 
 ## Development Notes
 
