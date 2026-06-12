@@ -5,9 +5,10 @@ Micromage is a Go-only workflow DAG UI shell. It uses server-rendered HTML, embe
 ## Requirements
 
 - Go 1.22 or newer
+- Node.js for the dependency-free browser JavaScript harness tests
 - Git
 
-No Node, NPM, Tailwind, Vite, Webpack, or frontend package manager is required. Go libraries are allowed when they fit the project.
+No NPM, Tailwind, Vite, Webpack, or frontend package manager is required. Go libraries are allowed when they fit the project.
 
 ## Run The App
 
@@ -46,9 +47,17 @@ go tool cover -func=coverage.out
 
 The project target is at least 70% total code coverage.
 
+Run the browser JavaScript harness tests without npm dependencies:
+
+```sh
+for test_file in internal/web/js/*.test.js; do
+  node "$test_file"
+done
+```
+
 ## Continuous Integration
 
-GitHub Actions runs the remote CI quality gate on pushes and pull requests. The workflow uses the Go version declared in `go.mod`, runs tests, vet, build, race tests, and the same 70% total coverage threshold as the local pre-commit hook.
+GitHub Actions runs the remote CI quality gate on pushes and pull requests. The workflow uses the Go version declared in `go.mod`, runs tests, vet, build, race tests, dependency-free browser JavaScript harness tests, and the same 70% total coverage threshold as the local pre-commit hook.
 
 The vulnerability scan installs the official Go vulnerability checker in CI with:
 
@@ -233,5 +242,6 @@ The serialization can be revisited if OpenCode adds documented per-run storage i
 gofmt -w cmd internal
 go test ./...
 go test ./... -coverprofile=coverage.out
+for test_file in internal/web/js/*.test.js; do node "$test_file"; done
 go run ./cmd/server
 ```

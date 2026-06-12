@@ -24,6 +24,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Download modules
         run: go mod download
 
@@ -38,6 +43,14 @@ jobs:
 
       - name: Race test
         run: go test -race ./...
+
+      - name: Browser JS harness tests
+        run: |
+          set -euo pipefail
+          # Browser-facing checks protect UI release readiness without adding npm dependencies.
+          for test_file in internal/web/js/*.test.js; do
+            node "$test_file"
+          done
 
       - name: Coverage gate
         run: |

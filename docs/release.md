@@ -5,6 +5,7 @@ Micromage currently ships as a single Go server binary with embedded HTML, JavaS
 ## Prerequisites
 
 - Go version from `go.mod` or newer
+- Node.js for the dependency-free browser JavaScript harness tests
 - Git
 - A clean working tree for release builds
 - OpenCode CLI installed on hosts that will run real provider-backed workflows
@@ -17,6 +18,9 @@ Run the same gates expected by CI:
 go test ./... -cover
 go vet ./...
 go test -race ./...
+for test_file in internal/web/js/*.test.js; do
+  node "$test_file"
+done
 git diff --check
 ```
 
