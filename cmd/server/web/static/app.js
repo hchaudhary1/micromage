@@ -8,10 +8,11 @@ const workflowSummary = document.querySelector("#workflow-summary");
 const workflowName = document.querySelector("#workflow-name");
 const workflowDescription = document.querySelector("#workflow-description");
 const issueCounts = document.querySelector("#issue-counts");
+const issuePanel = document.querySelector("#issue-panel");
 const dagSvg = document.querySelector("#dag-svg");
 const inspectorBody = document.querySelector("#inspector-body");
 const runLog = document.querySelector("#run-log");
-const templateState = window.MicromageTemplateState;
+const appState = window.MicromageTemplateState;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const NODE_WIDTH = 190;
@@ -30,7 +31,7 @@ async function boot() {
     .join("");
   templateSelect.addEventListener("change", () => {
     // Manual workflow edits need an explicit overwrite decision before template swaps.
-    const change = templateState.resolveTemplateChange({
+    const change = appState.resolveTemplateChange({
       templates,
       requestedTemplateID: templateSelect.value,
       previousTemplateID: currentTemplateID,
@@ -55,6 +56,13 @@ async function boot() {
   });
   runButton.addEventListener("click", runWorkflow);
   runMode.addEventListener("change", updatePreview);
+  issuePanel.addEventListener("click", (event) => {
+    const target = event.target.closest?.("[data-node-id]");
+    if (!target) return;
+    selectedNodeId = target.dataset.nodeId;
+    renderGraph(normalizedGraph(currentPreview?.graph));
+    renderInspector();
+  });
 
   const first = templates[0];
   currentTemplateID = first ? first.id : "";
@@ -80,19 +88,57 @@ async function updatePreview() {
 }
 
 function renderPreview(preview) {
-  const errors = preview.issues.filter((issue) => issue.level === "error").length;
-  const warnings = preview.issues.filter((issue) => issue.level === "warning").length;
-  workflowSummary.textContent = `${preview.graph.nodes.length} nodes`;
-  workflowName.textContent = preview.workflow.name || "Workflow";
-  workflowDescription.textContent = preview.workflow.description || "";
+  const counts = appState.issueCounts(preview);
+  const graph = normalizedGraph(preview.graph);
+  workflowSummary.textContent = `${graph.nodes.length} nodes`;
+  workflowName.textContent = preview.workflow?.name || "Workflow";
+  workflowDescription.textContent = preview.workflow?.description || "";
   issueCounts.innerHTML = [
-    `<span class="issue-badge error">${errors} errors</span>`,
-    `<span class="issue-badge warning">${warnings} warnings</span>`,
+    `<span class="issue-badge error">${counts.errors} errors</span>`,
+    `<span class="issue-badge warning">${counts.warnings} warnings</span>`,
   ].join("");
+  renderIssuePanel(preview);
   runButton.disabled = !preview.can_run;
   setState(preview.can_run ? "Runnable" : "Invalid", preview.can_run ? "ok" : "error");
-  renderGraph(preview.graph);
+  renderGraph(graph);
   renderInspector();
+}
+
+function normalizedGraph(graph) {
+  // Invalid YAML can still carry actionable issues even when graph collections are absent.
+  return {
+    edges: graph?.edges || [],
+    height: graph?.height || 0,
+    nodes: graph?.nodes || [],
+    width: graph?.width || 0,
+  };
+}
+
+function renderIssuePanel(preview) {
+  const issues = preview?.issues || [];
+  if (!issues.length) {
+    issuePanel.classList.add("empty");
+    issuePanel.innerHTML = "";
+    issuePanel.replaceChildren();
+    return;
+  }
+
+  issuePanel.classList.remove("empty");
+  // Global issues make validation blockers fixable without selecting each graph node.
+  issuePanel.innerHTML = [
+    `<h3>${issues.length} issue${issues.length === 1 ? "" : "s"}</h3>`,
+    `<ul>${issues.map(renderIssueItem).join("")}</ul>`,
+  ].join("");
+}
+
+function renderIssueItem(issue) {
+  const scope = escapeHTML(appState.issueScope(issue));
+  const level = escapeHTML(issue.level || "warning");
+  const message = escapeHTML(issue.message || "");
+  const scopeHTML = issue.node_id
+    ? `<button type="button" class="issue-link" data-node-id="${escapeHTML(issue.node_id)}">${scope}</button>`
+    : `<span class="issue-scope">${scope}</span>`;
+  return `<li class="${level}">${scopeHTML}<span class="issue-message">${message}</span></li>`;
 }
 
 function renderGraph(graph) {
@@ -156,7 +202,7 @@ function renderNode(node) {
 }
 
 function renderInspector() {
-  const node = currentPreview?.graph.nodes.find((item) => item.id === selectedNodeId);
+  const node = normalizedGraph(currentPreview?.graph).nodes.find((item) => item.id === selectedNodeId);
   if (!node) {
     inspectorBody.classList.add("muted");
     inspectorBody.textContent = "Select a node";
@@ -186,16 +232,14 @@ async function runWorkflow() {
     }),
   });
   if (!response.ok) {
-    const contentType = response.headers.get("Content-Type") || "";
-    if (contentType.includes("application/json")) {
+    const rejection = await appState.readRunRejection(response);
+    if (rejection.preview) {
       // Rejected real-run previews keep actionable validation visible after Run.
-      currentPreview = await response.json();
+      currentPreview = rejection.preview;
       renderPreview(currentPreview);
-      appendLog("run rejected", "log-error");
-      appendPreviewIssues(currentPreview);
-    } else {
-      appendLog("run rejected", "log-error");
     }
+    appendLog(rejection.summary, "log-error");
+    appendPreviewIssues(rejection.issues);
     runButton.disabled = !currentPreview?.can_run;
     return;
   }
@@ -229,15 +273,10 @@ function runRequestHeaders() {
   return headers;
 }
 
-function appendPreviewIssues(preview) {
-  for (const issue of preview?.issues || []) {
-    appendLog(formatIssue(issue), issue.level === "error" ? "log-error" : "log-detail");
+function appendPreviewIssues(issues) {
+  for (const issue of issues || []) {
+    appendLog(appState.formatIssue(issue), issue.level === "error" ? "log-error" : "log-detail");
   }
-}
-
-function formatIssue(issue) {
-  const scope = [issue.node_id, issue.field].filter(Boolean).join(" ");
-  return scope ? `${scope}: ${issue.message}` : issue.message;
 }
 
 function appendRunEvent(event) {

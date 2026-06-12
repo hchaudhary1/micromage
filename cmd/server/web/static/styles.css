@@ -216,7 +216,7 @@ h1 {
 
 .graph-pane {
   display: grid;
-  grid-template-rows: auto minmax(280px, 1fr) minmax(210px, 28vh);
+  grid-template-rows: auto auto minmax(280px, 1fr) minmax(210px, 28vh);
   overflow: hidden;
 }
 
@@ -244,6 +244,78 @@ h1 {
 .issue-counts {
   display: flex;
   gap: 8px;
+}
+
+.issue-panel {
+  display: grid;
+  gap: 8px;
+  max-height: 190px;
+  overflow: auto;
+  padding: 10px 18px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fff8f5;
+}
+
+.issue-panel.empty {
+  display: none;
+}
+
+.issue-panel h3 {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.issue-panel ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.issue-panel li {
+  display: grid;
+  grid-template-columns: minmax(110px, 32%) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.issue-panel li.error {
+  color: var(--rose);
+}
+
+.issue-panel li.warning {
+  color: var(--amber);
+}
+
+.issue-scope,
+.issue-link {
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.issue-link {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.issue-link:hover {
+  text-decoration: underline;
+  filter: none;
+}
+
+.issue-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
 }
 
 .graph-wrap {

@@ -50,6 +50,7 @@ async function main() {
     "#workflow-name": makeElement(),
     "#workflow-description": makeElement(),
     "#issue-counts": makeElement(),
+    "#issue-panel": makeElement(),
     "#dag-svg": makeElement(),
     "#inspector-body": makeElement(),
     "#run-log": makeElement(),
