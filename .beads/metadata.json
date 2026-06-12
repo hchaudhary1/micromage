@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "micromage",
-  "project_id": "f32fb696-6f73-4eef-a620-30bbb94d23ef"
-}

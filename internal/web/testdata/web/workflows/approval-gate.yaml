@@ -1,9 +1,0 @@
-name: approval-gate
-description: Approval template
-nodes:
-  - id: plan
-    prompt: plan
-  - id: approval
-    approval:
-      prompt: approve
-    depends_on: [plan]
