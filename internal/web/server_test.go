@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -365,6 +366,37 @@ nodes:
 	}
 	if _, ok := findRunEvent(events, "workflow_failed"); !ok {
 		t.Fatalf("expected workflow_failed event, got %#v", events)
+	}
+}
+
+func TestRealRunSummaryRejectsArtifactsOutsideRunDirectory(t *testing.T) {
+	dir := t.TempDir()
+	artifactsDir := filepath.Join(dir, ".micromage", "runs", "run-summary")
+	validPath := filepath.Join(artifactsDir, "review", "finding.md")
+	traversalPath := filepath.Join(dir, ".micromage", "runs", "escape.md")
+	absolutePath := filepath.Join(dir, "escape.md")
+	for path, content := range map[string]string{
+		validPath:     "valid",
+		traversalPath: "traversal",
+		absolutePath:  "absolute",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create artifact directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write artifact fixture: %v", err)
+		}
+	}
+	summary := newRealRunSummary(workflow.Workflow{Nodes: []workflow.Node{
+		{ID: "valid", Outputs: []string{"$ARTIFACTS_DIR/review/finding.md"}},
+		{ID: "traversal", Outputs: []string{"$ARTIFACTS_DIR/../escape.md"}},
+		{ID: "absolute", Outputs: []string{absolutePath}},
+	}}, dir, artifactsDir, "run-summary")
+
+	artifacts := summary.generatedArtifacts()
+
+	if len(artifacts) != 1 || artifacts[0].NodeID != "valid" || artifacts[0].Path != validPath {
+		t.Fatalf("expected only in-run artifact, got %#v", artifacts)
 	}
 }
 

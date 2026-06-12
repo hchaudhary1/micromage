@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -271,7 +270,10 @@ func (summary *realRunSummary) generatedArtifacts() []workflow.RunArtifact {
 	var artifacts []workflow.RunArtifact
 	for _, node := range summary.workflow.Nodes {
 		for _, pattern := range node.Outputs {
-			path := summary.resolveOutputPath(pattern)
+			path, err := summary.resolveOutputPath(pattern)
+			if err != nil {
+				continue
+			}
 			if info, err := os.Stat(path); err == nil && !info.IsDir() {
 				artifacts = append(artifacts, workflow.RunArtifact{NodeID: node.ID, Path: path})
 			}
@@ -280,11 +282,8 @@ func (summary *realRunSummary) generatedArtifacts() []workflow.RunArtifact {
 	return artifacts
 }
 
-func (summary *realRunSummary) resolveOutputPath(pattern string) string {
+func (summary *realRunSummary) resolveOutputPath(pattern string) (string, error) {
 	path := strings.ReplaceAll(pattern, "$ARTIFACTS_DIR", summary.artifactsDir)
 	path = strings.ReplaceAll(path, "$WORKFLOW_ID", summary.runID)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(summary.cwd, path)
-	}
-	return path
+	return workflow.ResolveDeclaredArtifactPath(path, summary.artifactsDir)
 }

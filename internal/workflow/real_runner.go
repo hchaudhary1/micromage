@@ -323,7 +323,11 @@ func (runner *RealRunner) collectExpectedOutputs(node Node, providerOutput strin
 	var collected []string
 	paths := make([]string, 0, len(node.Outputs))
 	for _, pattern := range node.Outputs {
-		paths = append(paths, runner.resolveOutputPath(pattern))
+		path, err := runner.resolveOutputPath(pattern)
+		if err != nil {
+			return "", fmt.Errorf("node %s has invalid declared output: %w", node.ID, err)
+		}
+		paths = append(paths, path)
 	}
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -348,12 +352,9 @@ func (runner *RealRunner) collectExpectedOutputs(node Node, providerOutput strin
 	return strings.Join(collected, "\n\n"), nil
 }
 
-func (runner *RealRunner) resolveOutputPath(pattern string) string {
+func (runner *RealRunner) resolveOutputPath(pattern string) (string, error) {
 	path := runner.expandPrompt(pattern)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(runner.cwd, path)
-	}
-	return path
+	return ResolveDeclaredArtifactPath(path, runner.artifactsDir)
 }
 
 func (runner *RealRunner) setOutput(id string, output string) {

@@ -640,6 +640,69 @@ func TestRealRunnerMaterializesDeclaredOutputFromProviderResponse(t *testing.T) 
 	}
 }
 
+func TestRealRunnerMaterializesRelativeDeclaredOutputInsideArtifactsDir(t *testing.T) {
+	provider := &captureProvider{}
+	dir := t.TempDir()
+	artifactsDir := filepath.Join(dir, ".micromage", "runs", "run-relative")
+	artifactPath := filepath.Join(artifactsDir, "review", "code-review-findings.md")
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    artifactsDir,
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"review/code-review-findings.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err != nil {
+		t.Fatalf("RunNode returned error: %v", err)
+	}
+	data, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("expected materialized artifact: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "captured" {
+		t.Fatalf("expected provider output artifact, got %q", string(data))
+	}
+}
+
+func TestRealRunnerRejectsDeclaredOutputEscapingArtifactsDir(t *testing.T) {
+	dir := t.TempDir()
+	artifactsDir := filepath.Join(dir, ".micromage", "runs", "run-escape")
+	cases := map[string]string{
+		"traversal": "$ARTIFACTS_DIR/../escape.md",
+		"absolute":  filepath.Join(dir, "escape.md"),
+	}
+	for name, declaredOutput := range cases {
+		t.Run(name, func(t *testing.T) {
+			provider := &captureProvider{}
+			runner := NewRealRunner(RealRunnerConfig{
+				CWD:             dir,
+				ArtifactsDir:    artifactsDir,
+				DefaultProvider: "capture",
+				Providers:       ProviderRegistry{"capture": provider},
+			})
+
+			err := runner.RunNode(context.Background(), Node{
+				ID:      "code-review",
+				Prompt:  "write the finding",
+				Outputs: []string{declaredOutput},
+			}, func(RunEvent) error { return nil })
+
+			if err == nil || !strings.Contains(err.Error(), "outside artifacts directory") {
+				t.Fatalf("expected artifact directory escape error, got %v", err)
+			}
+			if _, ok := runner.outputs["code-review"]; ok {
+				t.Fatalf("escaped output should not publish node output, got %#v", runner.outputs)
+			}
+		})
+	}
+}
+
 func TestRealWorkflowExecutionFeedsDeclaredArtifactsToDownstreamNodes(t *testing.T) {
 	dir := t.TempDir()
 	artifactsDir := filepath.Join(dir, ".micromage", "runs", "run-e2e")
