@@ -1,8 +1,11 @@
 package web
 
 import (
+	"bufio"
+	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +59,48 @@ func TestTemplatesEndpointReturnsEmbeddedTemplates(t *testing.T) {
 	}
 	if !hasTemplate(templates, "review-last-commit") {
 		t.Fatalf("expected review-last-commit template, got %#v", templates)
+	}
+}
+
+func TestHealthzEndpointReportsLiveness(t *testing.T) {
+	server := newTestServer(t)
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {
+		t.Fatalf("expected text health response, got %q", contentType)
+	}
+	if response.Body.String() != "ok\n" {
+		t.Fatalf("expected ok body, got %q", response.Body.String())
+	}
+}
+
+func TestReadyzEndpointReportsInitializedDependencies(t *testing.T) {
+	server := newTestServer(t).(*Server)
+
+	ready := httptest.NewRecorder()
+	server.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if ready.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", ready.Code)
+	}
+	if contentType := ready.Header().Get("Content-Type"); !strings.Contains(contentType, "text/plain") {
+		t.Fatalf("expected text readiness response, got %q", contentType)
+	}
+	if ready.Body.String() != "ok\n" {
+		t.Fatalf("expected ok body, got %q", ready.Body.String())
+	}
+
+	server.ready = func() bool { return false }
+	notReady := httptest.NewRecorder()
+	server.ServeHTTP(notReady, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if notReady.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", notReady.Code)
 	}
 }
 
@@ -313,6 +358,129 @@ func TestRunEndpointStreamsFakeEvents(t *testing.T) {
 		if !strings.Contains(body, frame) {
 			t.Fatalf("expected SSE frame %q in %q", frame, body)
 		}
+	}
+}
+
+func TestRequestLogsAreStructuredAndSanitized(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	var logs bytes.Buffer
+	server.logOutput = &logs
+	bodySecret := "secret-token"
+	bodyYAML := "name: leaked-workflow\ndescription: hidden\nnodes:\n  - id: plan\n    prompt: do not log\n"
+
+	response := postJSONWithOptions(server, "/api/preview?token=query-secret", `{"yaml": `+strconvQuote(bodyYAML)+`, "arguments": "`+bodySecret+`"}`, requestOptions{
+		token: "header-secret",
+	})
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	entry := findLogEntry(t, logs.String(), "http_request")
+	if entry["method"] != http.MethodPost || entry["path"] != "/api/preview" {
+		t.Fatalf("unexpected request log route fields: %#v", entry)
+	}
+	if status, ok := entry["status"].(float64); !ok || status != http.StatusOK {
+		t.Fatalf("expected status 200, got %#v", entry["status"])
+	}
+	if _, ok := entry["duration_ms"].(float64); !ok {
+		t.Fatalf("expected numeric duration_ms, got %#v", entry["duration_ms"])
+	}
+	for _, leaked := range []string{bodySecret, "header-secret", "query-secret", "leaked-workflow", "do not log"} {
+		if strings.Contains(logs.String(), leaked) {
+			t.Fatalf("request logs leaked sensitive content %q in %s", leaked, logs.String())
+		}
+	}
+}
+
+func TestRunLogsSimulatedLifecycleWithoutSensitiveContent(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	var logs bytes.Buffer
+	server.logOutput = &logs
+	input := `name: secret-run
+description: hidden
+nodes:
+  - id: plan
+    prompt: provider secret output should not be logged
+`
+
+	response := postJSON(server, "/api/run", `{"yaml": `+strconvQuote(input)+`, "mode": "simulate", "arguments": "token-like argument"}`)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.Code)
+	}
+	start := findLogEntry(t, logs.String(), "workflow_start")
+	if start["mode"] != "simulate" {
+		t.Fatalf("expected simulate start log, got %#v", start)
+	}
+	finish := findLogEntry(t, logs.String(), "workflow_complete")
+	if finish["mode"] != "simulate" || finish["status"] != "success" {
+		t.Fatalf("expected successful simulate completion log, got %#v", finish)
+	}
+	if _, ok := finish["duration_ms"].(float64); !ok {
+		t.Fatalf("expected numeric duration_ms, got %#v", finish["duration_ms"])
+	}
+	if _, ok := finish["run_id"]; ok {
+		t.Fatalf("simulate log should not include a run_id, got %#v", finish)
+	}
+	for _, leaked := range []string{"secret-run", "provider secret output", "token-like argument", "would run prompt node plan"} {
+		if strings.Contains(logs.String(), leaked) {
+			t.Fatalf("run logs leaked sensitive content %q in %s", leaked, logs.String())
+		}
+	}
+}
+
+func TestRunLogsRealFailureWithRunIDAndSanitizedReason(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
+	server := newTestServer(t).(*Server)
+	server.workingDirectory = func() string { return t.TempDir() }
+	server.nextRunID = func() string { return "run-log-id" }
+	var logs bytes.Buffer
+	server.logOutput = &logs
+	input := `name: real-log
+description: real log
+nodes:
+  - id: fail-review
+    bash: |
+      echo "artifact content should stay in SSE only"
+      echo "provider output should stay private" >&2
+      exit 7
+`
+
+	response := postJSONWithToken(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`, "secret")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
+	}
+	start := findLogEntry(t, logs.String(), "workflow_start")
+	if start["mode"] != "real" || start["run_id"] != "run-log-id" {
+		t.Fatalf("expected real start log with run_id, got %#v", start)
+	}
+	failure := findLogEntry(t, logs.String(), "workflow_failed")
+	if failure["mode"] != "real" || failure["run_id"] != "run-log-id" || failure["status"] != "failed" {
+		t.Fatalf("expected real failure log with run_id, got %#v", failure)
+	}
+	if reason, ok := failure["failure_reason"].(string); !ok || reason != "exit status 7" {
+		t.Fatalf("expected sanitized failure reason, got %#v", failure["failure_reason"])
+	}
+	if _, ok := failure["duration_ms"].(float64); !ok {
+		t.Fatalf("expected numeric duration_ms, got %#v", failure["duration_ms"])
+	}
+	for _, leaked := range []string{"artifact content should stay in SSE only", "provider output should stay private", "secret"} {
+		if strings.Contains(logs.String(), leaked) {
+			t.Fatalf("run logs leaked sensitive content %q in %s", leaked, logs.String())
+		}
+	}
+}
+
+func TestPublicFailureReasonIsSingleLineAndBounded(t *testing.T) {
+	reason := publicFailureReason(errors.New(strings.Repeat("x", 300) + "\nprovider output should not appear"))
+
+	if strings.Contains(reason, "\n") || strings.Contains(reason, "provider output") {
+		t.Fatalf("expected single-line public reason, got %q", reason)
+	}
+	if len(reason) > 259 || !strings.HasSuffix(reason, "...") {
+		t.Fatalf("expected bounded reason with suffix, got len=%d %q", len(reason), reason)
 	}
 }
 
@@ -828,4 +996,23 @@ func graphNodeLayer(nodes []workflow.NodeView, id string) int {
 func strconvQuote(value string) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func findLogEntry(t *testing.T, logs string, event string) map[string]any {
+	t.Helper()
+	scanner := bufio.NewScanner(strings.NewReader(logs))
+	for scanner.Scan() {
+		var entry map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			t.Fatalf("decode log entry %q: %v", scanner.Text(), err)
+		}
+		if entry["event"] == event {
+			return entry
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan logs: %v", err)
+	}
+	t.Fatalf("log entry %q not found in %s", event, logs)
+	return nil
 }

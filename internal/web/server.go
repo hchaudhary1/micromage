@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"io/fs"
 	"mime"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"micromage/internal/workflow"
@@ -28,6 +30,9 @@ type Server struct {
 	mux               *http.ServeMux
 	workingDirectory  func() string
 	nextRunID         func() string
+	ready             func() bool
+	logMu             sync.Mutex
+	logOutput         io.Writer
 }
 
 func NewServer(assets fs.FS) (*Server, error) {
@@ -57,10 +62,14 @@ func NewServer(assets fs.FS) (*Server, error) {
 		mux:               http.NewServeMux(),
 		workingDirectory:  mustGetwd,
 		nextRunID:         func() string { return "run-" + strconv.FormatInt(time.Now().UnixNano(), 10) },
+		ready:             func() bool { return true },
+		logOutput:         os.Stderr,
 	}
 
 	server.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFiles))))
 	server.mux.HandleFunc("GET /", server.handleShell)
+	server.mux.HandleFunc("GET /healthz", server.handleHealthz)
+	server.mux.HandleFunc("GET /readyz", server.handleReadyz)
 	server.mux.HandleFunc("GET /api/templates", server.handleTemplates)
 	server.mux.HandleFunc("POST /api/preview", server.handlePreview)
 	server.mux.HandleFunc("POST /api/run", server.handleRun)
@@ -69,7 +78,24 @@ func NewServer(assets fs.FS) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	start := time.Now()
+	observed := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+	writer := http.ResponseWriter(observed)
+	if _, ok := w.(http.Flusher); ok {
+		writer = &flushLoggingResponseWriter{loggingResponseWriter: observed}
+	}
+	s.mux.ServeHTTP(writer, r)
+	// Request logs give operators traffic health without recording workflow contents or credentials.
+	s.logJSON(map[string]any{
+		"event":       "http_request",
+		"method":      r.Method,
+		"path":        r.URL.Path,
+		"status":      observed.status,
+		"bytes":       observed.bytes,
+		"duration_ms": durationMillis(start),
+		"host":        r.Host,
+		"remote":      remoteHost(r.RemoteAddr),
+	})
 }
 
 func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +108,19 @@ func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {
 	if err := s.templates.ExecuteTemplate(w, "index.html", data); err != nil {
 		http.Error(w, "could not render workflow shell", http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	// Probe endpoints let production supervisors distinguish liveness from workflow execution.
+	writePlain(w, http.StatusOK, "ok\n")
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.ready == nil || !s.ready() {
+		writePlain(w, http.StatusServiceUnavailable, "not ready\n")
+		return
+	}
+	writePlain(w, http.StatusOK, "ok\n")
 }
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
@@ -149,8 +188,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	runner := workflow.NodeRunner(workflow.LoggingRunner{})
 	var summary *realRunSummary
+	runID := ""
 	if mode == "real" {
-		runID := s.nextRunID()
+		runID = s.nextRunID()
 		cwd := s.workingDirectory()
 		config := realRunnerConfig(s.commands, preview.Workflow, request, cwd, runID)
 		summary = newRealRunSummary(preview.Workflow, cwd, config.ArtifactsDir, runID)
@@ -165,8 +205,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	runStarted := time.Now()
+	s.logWorkflowStart(mode, runID)
 	if err := workflow.Execute(r.Context(), preview.Workflow, runner, emit); err != nil {
+		s.logWorkflowFinish("workflow_failed", mode, runID, "failed", runStarted, publicFailureReason(err))
 		_ = emit(workflow.RunEvent{Type: "workflow_failed", Message: err.Error()})
+	} else {
+		s.logWorkflowFinish("workflow_complete", mode, runID, "success", runStarted, "")
 	}
 	if summary != nil {
 		// Real-run summaries keep artifact evidence visible without shell inspection.
@@ -332,6 +377,112 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func writePlain(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+}
+
+func (s *Server) logWorkflowStart(mode string, runID string) {
+	entry := map[string]any{
+		"event": "workflow_start",
+		"mode":  mode,
+	}
+	if runID != "" {
+		entry["run_id"] = runID
+	}
+	s.logJSON(entry)
+}
+
+func (s *Server) logWorkflowFinish(event string, mode string, runID string, status string, started time.Time, failureReason string) {
+	entry := map[string]any{
+		"event":       event,
+		"mode":        mode,
+		"status":      status,
+		"duration_ms": durationMillis(started),
+	}
+	if runID != "" {
+		entry["run_id"] = runID
+	}
+	if failureReason != "" {
+		// Run lifecycle logs carry operator status without copying prompts, node logs, or artifacts.
+		entry["failure_reason"] = failureReason
+	}
+	s.logJSON(entry)
+}
+
+func publicFailureReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(err.Error())
+	if index := strings.IndexAny(reason, "\r\n"); index >= 0 {
+		reason = reason[:index]
+	}
+	const maxFailureReasonBytes = 256
+	if len(reason) > maxFailureReasonBytes {
+		reason = reason[:maxFailureReasonBytes] + "..."
+	}
+	return reason
+}
+
+func (s *Server) logJSON(entry map[string]any) {
+	if s.logOutput == nil {
+		return
+	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	_ = json.NewEncoder(s.logOutput).Encode(entry)
+}
+
+func durationMillis(start time.Time) float64 {
+	return float64(time.Since(start)) / float64(time.Millisecond)
+}
+
+func remoteHost(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return remoteAddr
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int
+	wroteHeader bool
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	written, err := w.ResponseWriter.Write(data)
+	w.bytes += written
+	return written, err
+}
+
+type flushLoggingResponseWriter struct {
+	*loggingResponseWriter
+}
+
+func (w *flushLoggingResponseWriter) Flush() {
+	w.ResponseWriter.(http.Flusher).Flush()
 }
 
 func mustGetwd() string {
