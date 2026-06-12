@@ -62,6 +62,48 @@ func TestTemplatesEndpointReturnsEmbeddedTemplates(t *testing.T) {
 	}
 }
 
+func TestTemplatesEndpointIncludesProjectDefinitionsWithOverride(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	store := workflow.NewDefinitionStore(dir)
+	if _, err := store.SaveWorkflow("idea-to-pr", `name: Project Idea
+description: Project override
+nodes:
+  - id: project
+    prompt: Project workflow.
+`); err != nil {
+		t.Fatalf("save project workflow: %v", err)
+	}
+	if _, err := store.SaveTemplate("saved-template", `name: Saved Template
+description: Saved template
+nodes:
+  - id: saved
+    prompt: Saved template.
+`); err != nil {
+		t.Fatalf("save project template: %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/templates", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
+	}
+	var templates []workflow.Template
+	if err := json.NewDecoder(response.Body).Decode(&templates); err != nil {
+		t.Fatalf("decode templates: %v", err)
+	}
+	idea := findTemplate(t, templates, "idea-to-pr")
+	if idea.Source != workflow.DefinitionSourceProject || idea.Kind != workflow.DefinitionKindWorkflow || idea.Name != "Project Idea" {
+		t.Fatalf("expected project workflow override, got %#v", idea)
+	}
+	saved := findTemplate(t, templates, "saved-template")
+	if saved.Source != workflow.DefinitionSourceProject || saved.Kind != workflow.DefinitionKindTemplate || !saved.Valid {
+		t.Fatalf("expected project saved template, got %#v", saved)
+	}
+}
+
 func TestHealthzEndpointReportsLiveness(t *testing.T) {
 	server := newTestServer(t)
 
@@ -1105,6 +1147,17 @@ func hasTemplate(templates []workflow.Template, id string) bool {
 		}
 	}
 	return false
+}
+
+func findTemplate(t *testing.T, templates []workflow.Template, id string) workflow.Template {
+	t.Helper()
+	for _, template := range templates {
+		if template.ID == id {
+			return template
+		}
+	}
+	t.Fatalf("template %q not found in %#v", id, templates)
+	return workflow.Template{}
 }
 
 func graphNodeLayer(nodes []workflow.NodeView, id string) int {

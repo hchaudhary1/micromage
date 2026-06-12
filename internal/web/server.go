@@ -125,7 +125,15 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.workflowTemplates)
+	store := workflow.NewDefinitionStore(s.workingDirectory())
+	// Template discovery includes project-local saved definitions without changing embedded starters.
+	templates, err := store.DiscoverDefinitions(s.workflowTemplates, nil)
+	if err != nil {
+		s.logJSON(map[string]any{"event": "definition_discovery_failed", "error": publicFailureReason(err)})
+		http.Error(w, "could not load workflow templates", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, templates)
 }
 
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
