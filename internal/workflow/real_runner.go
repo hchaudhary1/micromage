@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,7 +18,16 @@ import (
 )
 
 const DefaultOpenCodeModel = "opencode/nemotron-3-ultra-free"
-const maxOpenCodeTokenSize = 8 * 1024 * 1024
+
+const (
+	// Workflow limits keep local real runs from turning logs or artifacts into unbounded memory pressure.
+	maxBashStdoutBytes       = 1 * 1024 * 1024
+	maxBashStderrBytes       = 1 * 1024 * 1024
+	maxProviderLineBytes     = 1 * 1024 * 1024
+	maxProviderOutputBytes   = 4 * 1024 * 1024
+	maxNodeLogMessageBytes   = 256 * 1024
+	maxDeclaredArtifactBytes = 4 * 1024 * 1024
+)
 
 // OpenCode 1.16.2 uses one local SQLite database, so provider calls stay serialized to avoid lock failures.
 var openCodeMu sync.Mutex
@@ -205,21 +215,88 @@ func (runner *RealRunner) runBash(ctx context.Context, node Node, emit EventSink
 	cmd.Env = runner.env()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if text := strings.TrimSpace(stderr.String()); text != "" {
-			_ = emit(RunEvent{Type: "node_log", NodeID: node.ID, Message: text})
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	streamErrs := make(chan error, 2)
+	go readLimitedProcessStream(stdoutPipe, "stdout", maxBashStdoutBytes, &stdout, streamErrs)
+	go readLimitedProcessStream(stderrPipe, "stderr", maxBashStderrBytes, &stderr, streamErrs)
+
+	waitErrs := make(chan error, 1)
+	go func() {
+		waitErrs <- cmd.Wait()
+	}()
+
+	var streamErr error
+	var waitErr error
+	streamsDone := 0
+	waitDone := false
+	for streamsDone < 2 || !waitDone {
+		select {
+		case err := <-streamErrs:
+			streamsDone++
+			if err != nil && streamErr == nil {
+				streamErr = err
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}
+		case err := <-waitErrs:
+			waitDone = true
+			waitErr = err
 		}
-		return stdout.String(), err
+	}
+	if streamErr != nil {
+		return stdout.String(), streamErr
+	}
+	if waitErr != nil {
+		if text := strings.TrimSpace(stderr.String()); text != "" {
+			if emitErr := emitBoundedNodeLog(node.ID, "bash stderr", text, emit); emitErr != nil {
+				return stdout.String(), emitErr
+			}
+		}
+		return stdout.String(), waitErr
 	}
 	output := strings.TrimRight(stdout.String(), "\n")
 	if output != "" {
-		if err := emit(RunEvent{Type: "node_log", NodeID: node.ID, Message: output}); err != nil {
+		if err := emitBoundedNodeLog(node.ID, "bash stdout", output, emit); err != nil {
 			return output, err
 		}
 	}
 	return output, nil
+}
+
+func readLimitedProcessStream(stream io.Reader, name string, limit int64, output *bytes.Buffer, errs chan<- error) {
+	var total int64
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := stream.Read(buf)
+		if n > 0 {
+			total += int64(n)
+			if total > limit {
+				errs <- fmt.Errorf("bash %s exceeded limit of %d bytes", name, limit)
+				return
+			}
+			_, _ = output.Write(buf[:n])
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				errs <- nil
+				return
+			}
+			errs <- err
+			return
+		}
+	}
 }
 
 func (runner *RealRunner) env() []string {
@@ -330,14 +407,18 @@ func (runner *RealRunner) collectExpectedOutputs(node Node, providerOutput strin
 		paths = append(paths, path)
 	}
 	for _, path := range paths {
-		data, err := os.ReadFile(path)
+		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				if len(paths) == 1 && strings.TrimSpace(providerOutput) != "" {
+					materialized := []byte(strings.TrimSpace(providerOutput) + "\n")
+					if len(materialized) > maxDeclaredArtifactBytes {
+						return "", fmt.Errorf("node %s declared output exceeds artifact read limit of %d bytes: %s", node.ID, maxDeclaredArtifactBytes, path)
+					}
 					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 						return "", err
 					}
-					if err := os.WriteFile(path, []byte(strings.TrimSpace(providerOutput)+"\n"), 0o644); err != nil {
+					if err := os.WriteFile(path, materialized, 0o644); err != nil {
 						return "", err
 					}
 					collected = append(collected, strings.TrimSpace(providerOutput))
@@ -345,6 +426,16 @@ func (runner *RealRunner) collectExpectedOutputs(node Node, providerOutput strin
 				}
 				return "", fmt.Errorf("node %s expected output was not written: %s", node.ID, path)
 			}
+			return "", err
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("node %s expected output is a directory: %s", node.ID, path)
+		}
+		if info.Size() > maxDeclaredArtifactBytes {
+			return "", fmt.Errorf("node %s declared output exceeds artifact read limit of %d bytes: %s", node.ID, maxDeclaredArtifactBytes, path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
 			return "", err
 		}
 		collected = append(collected, strings.TrimSpace(string(data)))
@@ -440,35 +531,63 @@ func (provider OpenCodeProvider) RunPrompt(ctx context.Context, request PromptRe
 
 func scanOpenCode(stream io.Reader, nodeID string, emit EventSink, output *strings.Builder, errs chan<- error) {
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 64*1024), maxOpenCodeTokenSize)
+	scanner.Buffer(make([]byte, 64*1024), maxProviderLineBytes)
 	for scanner.Scan() {
 		text := extractOpenCodeText(scanner.Text())
 		if text == "" {
 			continue
 		}
-		output.WriteString(text)
-		if err := emit(RunEvent{Type: "node_log", NodeID: nodeID, Message: text}); err != nil {
+		if err := appendProviderOutput(nodeID, output, text); err != nil {
+			errs <- err
+			return
+		}
+		if err := emitBoundedNodeLog(nodeID, "provider", text, emit); err != nil {
 			errs <- err
 			return
 		}
 	}
-	errs <- scanner.Err()
+	errs <- providerScannerErr(scanner.Err(), "provider stdout")
 }
 
 func scanPlain(stream io.Reader, nodeID string, emit EventSink, errs chan<- error) {
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 64*1024), maxOpenCodeTokenSize)
+	scanner.Buffer(make([]byte, 64*1024), maxProviderLineBytes)
 	for scanner.Scan() {
 		text := strings.TrimSpace(scanner.Text())
 		if text == "" {
 			continue
 		}
-		if err := emit(RunEvent{Type: "node_log", NodeID: nodeID, Message: text}); err != nil {
+		if err := emitBoundedNodeLog(nodeID, "provider stderr", text, emit); err != nil {
 			errs <- err
 			return
 		}
 	}
-	errs <- scanner.Err()
+	errs <- providerScannerErr(scanner.Err(), "provider stderr")
+}
+
+func appendProviderOutput(nodeID string, output *strings.Builder, text string) error {
+	if output.Len()+len(text) > maxProviderOutputBytes {
+		return fmt.Errorf("provider output for node %s exceeded limit of %d bytes", nodeID, maxProviderOutputBytes)
+	}
+	output.WriteString(text)
+	return nil
+}
+
+func emitBoundedNodeLog(nodeID string, source string, message string, emit EventSink) error {
+	if len(message) > maxNodeLogMessageBytes {
+		return fmt.Errorf("node %s %s log exceeded limit of %d bytes", nodeID, source, maxNodeLogMessageBytes)
+	}
+	return emit(RunEvent{Type: "node_log", NodeID: nodeID, Message: message})
+}
+
+func providerScannerErr(err error, source string) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "token too long") {
+		return fmt.Errorf("%s line exceeded limit of %d bytes", source, maxProviderLineBytes)
+	}
+	return err
 }
 
 func extractOpenCodeText(line string) string {

@@ -147,6 +147,12 @@ opencode run --model opencode/nemotron-3-ultra-free --format json --dir <repo> <
 
 Set `MICROMAGE_OPENCODE_UNSAFE=1` only when you intentionally want Micromage to append OpenCode's `--dangerously-skip-permissions` flag.
 
+### Runtime Limits
+
+Micromage rejects oversized `/api/preview` and `/api/run` JSON request bodies above 1 MiB before parsing them. Real bash nodes cap stdout and stderr at 1 MiB each, and individual `node_log` messages at 256 KiB, so a noisy script fails clearly instead of growing server memory or flooding the event stream.
+
+OpenCode provider streams cap each stdout/stderr line at 1 MiB, accumulated assistant output at 4 MiB per node, and individual provider log messages at 256 KiB. Declared output artifacts are stat-checked before reading and are capped at 4 MiB per file.
+
 ### Running `review-last-commit`
 
 The embedded `review-last-commit` workflow is intended to review the current `HEAD` commit against the local repository state.

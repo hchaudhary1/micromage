@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -581,6 +582,47 @@ func TestRealRunnerRunsBashWithArgumentsArtifactsAndOutputs(t *testing.T) {
 	}
 }
 
+func TestRealRunnerRejectsOversizedBashStdoutAndStderr(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name    string
+		script  string
+		message string
+	}{
+		{
+			name:    "stdout",
+			script:  `printf "%` + strconv.Itoa(maxBashStdoutBytes+1) + `s" ""`,
+			message: "bash stdout exceeded limit",
+		},
+		{
+			name:    "stderr",
+			script:  `printf "%` + strconv.Itoa(maxBashStderrBytes+1) + `s" "" >&2; exit 7`,
+			message: "bash stderr exceeded limit",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := NewRealRunner(RealRunnerConfig{CWD: dir, ArtifactsDir: dir})
+			var logs []RunEvent
+
+			err := runner.RunNode(context.Background(), Node{ID: "verify", Bash: tc.script}, func(event RunEvent) error {
+				logs = append(logs, event)
+				return nil
+			})
+
+			if err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("expected %q error, got %v", tc.message, err)
+			}
+			if len(logs) != 0 {
+				t.Fatalf("oversized bash output should not emit node_log events, got %#v", logs)
+			}
+			if _, ok := runner.outputs["verify"]; ok {
+				t.Fatalf("oversized bash output should not publish node output, got %#v", runner.outputs)
+			}
+		})
+	}
+}
+
 func TestRealRunnerExpandsOutputsInPromptNodes(t *testing.T) {
 	provider := &captureProvider{}
 	runner := NewRealRunner(RealRunnerConfig{
@@ -851,6 +893,31 @@ func TestRealRunnerCapturesDeclaredOutput(t *testing.T) {
 	}
 }
 
+func TestRealRunnerRejectsOversizedDeclaredOutputBeforeRead(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, ".micromage", "runs", "run-large", "review", "code-review-findings.md")
+	provider := &captureProvider{writeFiles: map[string]string{artifactPath: strings.Repeat("x", maxDeclaredArtifactBytes+1)}}
+	runner := NewRealRunner(RealRunnerConfig{
+		CWD:             dir,
+		ArtifactsDir:    filepath.Join(dir, ".micromage", "runs", "run-large"),
+		DefaultProvider: "capture",
+		Providers:       ProviderRegistry{"capture": provider},
+	})
+
+	err := runner.RunNode(context.Background(), Node{
+		ID:      "code-review",
+		Prompt:  "write the finding",
+		Outputs: []string{"$ARTIFACTS_DIR/review/code-review-findings.md"},
+	}, func(RunEvent) error { return nil })
+
+	if err == nil || !strings.Contains(err.Error(), "declared output exceeds artifact read limit") {
+		t.Fatalf("expected declared artifact size error, got %v", err)
+	}
+	if _, ok := runner.outputs["code-review"]; ok {
+		t.Fatalf("oversized artifact should not publish node output, got %#v", runner.outputs)
+	}
+}
+
 func TestRealRunnerFailsWhenMultipleDeclaredOutputsAreMissing(t *testing.T) {
 	provider := &captureProvider{}
 	dir := t.TempDir()
@@ -1017,6 +1084,54 @@ func TestScanOpenCodeAcceptsLongJSONLines(t *testing.T) {
 	}
 	if output.String() != longText {
 		t.Fatalf("expected long text output, got length %d", output.Len())
+	}
+}
+
+func TestScanOpenCodeReportsProviderLineLimit(t *testing.T) {
+	var output strings.Builder
+	errs := make(chan error, 1)
+
+	scanOpenCode(strings.NewReader(strings.Repeat("x", maxProviderLineBytes+1)), "review", func(RunEvent) error { return nil }, &output, errs)
+
+	if err := <-errs; err == nil || !strings.Contains(err.Error(), "provider stdout line exceeded limit") {
+		t.Fatalf("expected provider line limit error, got %v", err)
+	}
+}
+
+func TestScanOpenCodeReportsProviderOutputLimit(t *testing.T) {
+	chunk := strings.Repeat("x", 128*1024)
+	line := `{"type":"text","part":{"type":"text","text":` + quoteJSON(chunk) + "}}\n"
+	var input strings.Builder
+	for input.Len() <= maxProviderOutputBytes+len(line) {
+		input.WriteString(line)
+	}
+	var output strings.Builder
+	errs := make(chan error, 1)
+
+	scanOpenCode(strings.NewReader(input.String()), "review", func(RunEvent) error { return nil }, &output, errs)
+
+	if err := <-errs; err == nil || !strings.Contains(err.Error(), "provider output for node review exceeded limit") {
+		t.Fatalf("expected provider output limit error, got %v", err)
+	}
+	if output.Len() > maxProviderOutputBytes {
+		t.Fatalf("provider output should stop at limit, got %d", output.Len())
+	}
+}
+
+func TestScanPlainReportsProviderLogMessageLimit(t *testing.T) {
+	var logs []RunEvent
+	errs := make(chan error, 1)
+
+	scanPlain(strings.NewReader(strings.Repeat("x", maxNodeLogMessageBytes+1)), "review", func(event RunEvent) error {
+		logs = append(logs, event)
+		return nil
+	}, errs)
+
+	if err := <-errs; err == nil || !strings.Contains(err.Error(), "provider stderr log exceeded limit") {
+		t.Fatalf("expected provider log limit error, got %v", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("oversized provider log should not emit node_log events, got %#v", logs)
 	}
 }
 

@@ -329,6 +329,9 @@ func TestPreviewEndpointRejectsOversizedRequestBodies(t *testing.T) {
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d with %q", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), "request body too large") {
+		t.Fatalf("expected clear request size error, got %q", response.Body.String())
+	}
 }
 
 func TestRunEndpointStreamsFakeEvents(t *testing.T) {
@@ -724,6 +727,9 @@ func TestRunEndpointRejectsOversizedRequestBodies(t *testing.T) {
 
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d with %q", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "request body too large") {
+		t.Fatalf("expected clear request size error, got %q", response.Body.String())
 	}
 }
 
