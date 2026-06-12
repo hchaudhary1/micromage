@@ -36,6 +36,7 @@ async function boot() {
     previewTimer = window.setTimeout(updatePreview, 220);
   });
   runButton.addEventListener("click", runWorkflow);
+  runMode.addEventListener("change", updatePreview);
 
   const first = templates[0];
   yamlEditor.value = first ? first.yaml : "";
@@ -164,7 +165,16 @@ async function runWorkflow() {
     }),
   });
   if (!response.ok) {
-    appendLog("run rejected");
+    const contentType = response.headers.get("Content-Type") || "";
+    if (contentType.includes("application/json")) {
+      // Rejected real-run previews keep actionable validation visible after Run.
+      currentPreview = await response.json();
+      renderPreview(currentPreview);
+      appendLog("run rejected", "log-error");
+      appendPreviewIssues(currentPreview);
+    } else {
+      appendLog("run rejected", "log-error");
+    }
     runButton.disabled = !currentPreview?.can_run;
     return;
   }
@@ -186,6 +196,17 @@ async function runWorkflow() {
     }
   }
   runButton.disabled = !currentPreview?.can_run;
+}
+
+function appendPreviewIssues(preview) {
+  for (const issue of preview?.issues || []) {
+    appendLog(formatIssue(issue), issue.level === "error" ? "log-error" : "log-detail");
+  }
+}
+
+function formatIssue(issue) {
+  const scope = [issue.node_id, issue.field].filter(Boolean).join(" ");
+  return scope ? `${scope}: ${issue.message}` : issue.message;
 }
 
 function appendRunEvent(event) {

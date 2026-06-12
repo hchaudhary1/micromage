@@ -84,13 +84,13 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
-	input, ok := readYAMLRequest(w, r)
+	request, ok := readRunRequest(w, r)
 	if !ok {
 		return
 	}
 
 	// The preview endpoint makes Go the source of truth for graph structure.
-	writeJSON(w, http.StatusOK, workflow.BuildPreviewWithCommands(input, s.commands))
+	writeJSON(w, http.StatusOK, s.previewForRequest(request))
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +99,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	preview := workflow.BuildPreviewWithCommands(request.YAML, s.commands)
+	preview := s.previewForRequest(request)
 	if !preview.CanRun {
 		writeJSON(w, http.StatusBadRequest, preview)
 		return
@@ -168,6 +168,27 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) previewForRequest(request yamlRequest) workflow.Preview {
+	preview := workflow.BuildPreviewWithCommands(request.YAML, s.commands)
+	if request.Mode == "real" {
+		return applyRealRunPreflight(preview)
+	}
+	return preview
+}
+
+func applyRealRunPreflight(preview workflow.Preview) workflow.Preview {
+	if !preview.CanRun {
+		return preview
+	}
+	if issues := workflow.ValidateRealRun(preview.Workflow, nil); len(issues) > 0 {
+		// Real preflight stays JSON so clients can fix execution blockers before streaming starts.
+		preview.Issues = append(preview.Issues, issues...)
+		preview.CanRun = false
+		preview.Graph = workflow.BuildGraph(preview.Workflow, preview.Issues)
+	}
+	return preview
+}
+
 func realRunnerConfig(commands workflow.CommandRegistry, parsed workflow.Workflow, request yamlRequest, cwd string, runID string) workflow.RealRunnerConfig {
 	return workflow.RealRunnerConfig{
 		Commands:        commands,
@@ -186,14 +207,6 @@ type yamlRequest struct {
 	YAML      string `json:"yaml"`
 	Arguments string `json:"arguments"`
 	Mode      string `json:"mode"`
-}
-
-func readYAMLRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
-	request, ok := readRunRequest(w, r)
-	if !ok {
-		return "", false
-	}
-	return request.YAML, true
 }
 
 func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) {

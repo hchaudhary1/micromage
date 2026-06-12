@@ -1042,6 +1042,52 @@ func TestRealRunnerFailsUnsupportedRealNodeKinds(t *testing.T) {
 	}
 }
 
+func TestValidateRealRunAcceptsSupportedMetadataAndRejectsIgnoredControls(t *testing.T) {
+	idleTimeout := 1000
+	validIssues := ValidateRealRun(Workflow{
+		Provider: "opencode",
+		Nodes: []Node{
+			{ID: "plan", Prompt: "plan", Context: "fresh", Agent: "general", IdleTimeout: &idleTimeout, Outputs: []string{"$ARTIFACTS_DIR/plan.md"}},
+			{ID: "verify", Bash: "go test ./...", DependsOn: []string{"plan"}},
+		},
+	}, nil)
+	if HasErrors(validIssues) {
+		t.Fatalf("expected supported real metadata to pass, got %#v", validIssues)
+	}
+
+	issues := ValidateRealRun(Workflow{
+		Provider:    "codex",
+		Interactive: boolRef(true),
+		Worktree:    map[string]any{"enabled": true},
+		Nodes: []Node{
+			{ID: "plan", Prompt: "plan", Provider: "codex", When: "branch == main", Retry: map[string]any{"max_attempts": 2}, Hooks: map[string]any{"before": "echo before"}, MCP: "filesystem", Skills: []string{"review"}, AllowedTools: []string{"Read"}},
+			{ID: "approve", Approval: map[string]any{"prompt": "continue?"}},
+		},
+	}, nil)
+
+	for _, want := range []struct {
+		nodeID string
+		field  string
+		part   string
+	}{
+		{"", "provider", "codex"},
+		{"", "interactive", "not executed in real mode"},
+		{"", "worktree", "not executed in real mode"},
+		{"plan", "provider", "codex"},
+		{"plan", "when", "not executed in real mode"},
+		{"plan", "retry", "not executed in real mode"},
+		{"plan", "hooks", "not executed in real mode"},
+		{"plan", "mcp", "not executed in real mode"},
+		{"plan", "skills", "not executed in real mode"},
+		{"plan", "allowed_tools", "not executed in real mode"},
+		{"approve", "approval", "unsupported real node kind approval"},
+	} {
+		if !containsNodeIssue(issues, want.nodeID, want.field, want.part) {
+			t.Fatalf("expected issue node=%q field=%q containing %q, got %#v", want.nodeID, want.field, want.part, issues)
+		}
+	}
+}
+
 func TestOpenCodeProviderSmokeOptIn(t *testing.T) {
 	if os.Getenv("MICROMAGE_OPENCODE_E2E") != "1" {
 		t.Skip("set MICROMAGE_OPENCODE_E2E=1 to run the local OpenCode smoke test")
@@ -1093,6 +1139,15 @@ func containsMessage(issues []Issue, message string) bool {
 	return false
 }
 
+func containsNodeIssue(issues []Issue, nodeID string, field string, message string) bool {
+	for _, issue := range issues {
+		if issue.NodeID == nodeID && issue.Field == field && strings.Contains(issue.Message, message) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1100,6 +1155,10 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func boolRef(value bool) *bool {
+	return &value
 }
 
 func countEvents(events []RunEvent, eventType string) int {

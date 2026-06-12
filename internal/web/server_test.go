@@ -206,6 +206,42 @@ func TestPreviewEndpointKeepsInvalidGraphButDisablesRun(t *testing.T) {
 	}
 }
 
+func TestPreviewEndpointDistinguishesRealRunExecutability(t *testing.T) {
+	server := newTestServer(t)
+	input := `name: real-preview
+description: real preview
+provider: codex
+nodes:
+  - id: approve-plan
+    approval:
+      prompt: Continue?
+`
+
+	simulated := postJSON(server, "/api/preview", `{"mode":"simulate","yaml": `+strconvQuote(input)+`}`)
+	if simulated.Code != http.StatusOK {
+		t.Fatalf("expected simulate preview 200, got %d", simulated.Code)
+	}
+	var simulatePreview workflow.Preview
+	if err := json.NewDecoder(simulated.Body).Decode(&simulatePreview); err != nil {
+		t.Fatalf("decode simulate preview: %v", err)
+	}
+	if !simulatePreview.CanRun {
+		t.Fatalf("expected simulate preview to remain runnable, got %#v", simulatePreview.Issues)
+	}
+
+	real := postJSON(server, "/api/preview", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+	if real.Code != http.StatusOK {
+		t.Fatalf("expected real preview 200, got %d", real.Code)
+	}
+	var realPreview workflow.Preview
+	if err := json.NewDecoder(real.Body).Decode(&realPreview); err != nil {
+		t.Fatalf("decode real preview: %v", err)
+	}
+	if !previewContainsNodeIssue(realPreview, "", "provider", "codex") || !previewContainsNodeIssue(realPreview, "approve-plan", "approval", "unsupported real node kind approval") {
+		t.Fatalf("expected real preflight issues, got %#v", realPreview.Issues)
+	}
+}
+
 func TestPreviewEndpointReportsEmptyAndMalformedPayloads(t *testing.T) {
 	server := newTestServer(t)
 
@@ -298,6 +334,112 @@ func TestRunEndpointRejectsInvalidWorkflow(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", response.Code)
+	}
+}
+
+func TestRunEndpointRejectsUnsupportedRealNodeKindsBeforeStreaming(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	server := newTestServer(t)
+	input := `name: real-kinds
+description: real kinds
+nodes:
+  - id: approval-step
+    approval:
+      prompt: Continue?
+  - id: cancel-step
+    cancel: stop now
+  - id: loop-step
+    loop:
+      items: [one]
+  - id: script-step
+    script:
+      language: js
+      source: console.log("hi")
+`
+
+	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+
+	assertPreviewValidationResponse(t, response)
+	var preview workflow.Preview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode validation preview: %v", err)
+	}
+	for _, want := range []struct {
+		nodeID string
+		field  string
+		kind   string
+	}{
+		{"approval-step", "approval", "approval"},
+		{"cancel-step", "cancel", "cancel"},
+		{"loop-step", "loop", "loop"},
+		{"script-step", "script", "script"},
+	} {
+		if !previewContainsNodeIssue(preview, want.nodeID, want.field, want.kind) {
+			t.Fatalf("expected unsupported %s issue for %s, got %#v", want.kind, want.nodeID, preview.Issues)
+		}
+	}
+}
+
+func TestRunEndpointRejectsUnregisteredRealProviderBeforeStreaming(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	server := newTestServer(t)
+	input := `name: real-provider
+description: real provider
+provider: codex
+nodes:
+  - id: plan
+    prompt: plan
+`
+
+	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+
+	assertPreviewValidationResponse(t, response)
+	var preview workflow.Preview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode validation preview: %v", err)
+	}
+	if !previewContainsNodeIssue(preview, "", "provider", "codex") || !previewContainsNodeIssue(preview, "", "provider", "opencode") {
+		t.Fatalf("expected provider issue to name codex and registered providers, got %#v", preview.Issues)
+	}
+}
+
+func TestRunEndpointRejectsIgnoredRealSemanticsBeforeStreaming(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	server := newTestServer(t)
+	input := `name: real-semantics
+description: real semantics
+interactive: true
+worktree:
+  enabled: true
+nodes:
+  - id: plan
+    prompt: plan
+    when: branch == main
+    retry:
+      max_attempts: 2
+    hooks:
+      before: echo before
+    mcp: filesystem
+    skills: [review]
+    allowed_tools: [Read]
+`
+
+	response := postJSON(server, "/api/run", `{"mode":"real","yaml": `+strconvQuote(input)+`}`)
+
+	assertPreviewValidationResponse(t, response)
+	var preview workflow.Preview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatalf("decode validation preview: %v", err)
+	}
+	for _, field := range []string{"interactive", "worktree"} {
+		if !previewContainsNodeIssue(preview, "", field, "not executed in real mode") {
+			t.Fatalf("expected workflow %s issue, got %#v", field, preview.Issues)
+		}
+	}
+	for _, field := range []string{"when", "retry", "hooks", "mcp", "skills", "allowed_tools"} {
+		if !previewContainsNodeIssue(preview, "plan", field, "not executed in real mode") {
+			t.Fatalf("expected node %s issue, got %#v", field, preview.Issues)
+		}
 	}
 }
 
@@ -491,9 +633,32 @@ func eventHasArtifact(event workflow.RunEvent, nodeID string, path string) bool 
 	return false
 }
 
+func assertPreviewValidationResponse(t *testing.T, response *httptest.ResponseRecorder) {
+	t.Helper()
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d with %q", response.Code, response.Body.String())
+	}
+	contentType := response.Header().Get("Content-Type")
+	if strings.Contains(contentType, "text/event-stream") || !strings.Contains(contentType, "application/json") {
+		t.Fatalf("expected JSON validation response before streaming, got content-type %q and body %q", contentType, response.Body.String())
+	}
+}
+
 func previewContainsIssue(preview workflow.Preview, field string) bool {
 	for _, issue := range preview.Issues {
 		if issue.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
+func previewContainsNodeIssue(preview workflow.Preview, nodeID string, field string, messagePart string) bool {
+	if preview.CanRun {
+		return false
+	}
+	for _, issue := range preview.Issues {
+		if issue.NodeID == nodeID && issue.Field == field && strings.Contains(issue.Message, messagePart) {
 			return true
 		}
 	}
