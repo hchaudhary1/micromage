@@ -26,6 +26,7 @@ type DefinitionStore struct {
 	storeRoot string
 	now       func() time.Time
 	rename    func(string, string) error
+	audit     *AuditStore
 }
 
 type definitionIndex struct {
@@ -57,6 +58,7 @@ func NewDefinitionStore(repoRoot string) *DefinitionStore {
 		storeRoot: filepath.Join(cleanRoot, ".micromage"),
 		now:       func() time.Time { return time.Now().UTC() },
 		rename:    os.Rename,
+		audit:     NewAuditStore(cleanRoot),
 	}
 }
 
@@ -175,7 +177,32 @@ func (store *DefinitionStore) saveDefinition(kind string, id string, yamlText st
 		}
 		return Template{}, err
 	}
+	if err := store.auditDefinitionSaved(kind, entry); err != nil {
+		return Template{}, err
+	}
 	return templateFromIndexEntry(entry, yamlText), nil
+}
+
+func (store *DefinitionStore) auditDefinitionSaved(kind string, entry definitionIndexEntry) error {
+	if store.audit == nil {
+		return nil
+	}
+	eventType := AuditTypeWorkflowSaved
+	if kind == DefinitionKindTemplate {
+		eventType = AuditTypeTemplateSaved
+	}
+	// Saved-definition audits prove user-managed content changed without storing YAML bodies.
+	return store.audit.Append(AuditEvent{
+		Type:       eventType,
+		WorkflowID: entry.ID,
+		Actor:      AuditActorLocalBrowser,
+		Outcome:    "success",
+		Details: map[string]string{
+			"kind":   kind,
+			"path":   entry.Path,
+			"source": entry.Source,
+		},
+	})
 }
 
 func (store *DefinitionStore) loadProjectDefinitions(kind string) ([]Template, error) {

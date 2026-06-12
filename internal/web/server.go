@@ -161,12 +161,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode == "real" {
-		if !authorizeRealRun(w, r) {
+		if !s.authorizeRealRun(w, r) {
 			return
 		}
 	}
 	preview := s.previewForRequest(request)
 	if !preview.CanRun {
+		if mode == "real" {
+			s.auditRealRunAuthorization(workflow.AuditTypeRealRunRejected, "failure", "validation_failed")
+		}
 		writeJSON(w, http.StatusBadRequest, preview)
 		return
 	}
@@ -398,29 +401,51 @@ func hasJSONContentType(r *http.Request) bool {
 	return err == nil && strings.EqualFold(mediaType, "application/json")
 }
 
-func authorizeRealRun(w http.ResponseWriter, r *http.Request) bool {
-	if os.Getenv("MICROMAGE_ENABLE_REAL_RUNS") != "1" {
-		http.Error(w, "real runs require MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
+func (s *Server) authorizeRealRun(w http.ResponseWriter, r *http.Request) bool {
+	ok, status, message, reason := realRunAuthorization(r)
+	if !ok {
+		http.Error(w, message, status)
+		s.auditRealRunAuthorization(workflow.AuditTypeRealRunRejected, "failure", reason)
 		return false
+	}
+	s.auditRealRunAuthorization(workflow.AuditTypeRealRunAuthorized, "success", "")
+	return true
+}
+
+func realRunAuthorization(r *http.Request) (bool, int, string, string) {
+	if os.Getenv("MICROMAGE_ENABLE_REAL_RUNS") != "1" {
+		return false, http.StatusForbidden, "real runs require MICROMAGE_ENABLE_REAL_RUNS=1", "real_runs_disabled"
 	}
 	token := os.Getenv("MICROMAGE_REAL_RUN_TOKEN")
 	if token == "" {
-		http.Error(w, "real runs require MICROMAGE_REAL_RUN_TOKEN when MICROMAGE_ENABLE_REAL_RUNS=1", http.StatusForbidden)
-		return false
+		return false, http.StatusForbidden, "real runs require MICROMAGE_REAL_RUN_TOKEN when MICROMAGE_ENABLE_REAL_RUNS=1", "token_not_configured"
 	}
 	if !isTrustedLocalHost(r.Host) {
-		http.Error(w, "real runs require a local Host header", http.StatusForbidden)
-		return false
+		return false, http.StatusForbidden, "real runs require a local Host header", "untrusted_host"
 	}
 	if !isTrustedLocalOrigin(r.Header.Get("Origin")) {
-		http.Error(w, "real runs require a local Origin header when Origin is present", http.StatusForbidden)
-		return false
+		return false, http.StatusForbidden, "real runs require a local Origin header when Origin is present", "untrusted_origin"
 	}
 	if !realRunTokenMatches(token, requestRealRunToken(r)) {
-		http.Error(w, "real runs require Authorization: Bearer MICROMAGE_REAL_RUN_TOKEN", http.StatusUnauthorized)
-		return false
+		return false, http.StatusUnauthorized, "real runs require Authorization: Bearer MICROMAGE_REAL_RUN_TOKEN", "token_mismatch"
 	}
-	return true
+	return true, http.StatusOK, "", ""
+}
+
+func (s *Server) auditRealRunAuthorization(eventType string, outcome string, reason string) {
+	details := map[string]string{"mode": "real"}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	// Authorization audits explain real-run decisions without persisting tokens or headers.
+	if err := workflow.NewAuditStore(s.workingDirectory()).Append(workflow.AuditEvent{
+		Type:    eventType,
+		Actor:   workflow.AuditActorLocalBrowser,
+		Outcome: outcome,
+		Details: details,
+	}); err != nil {
+		s.logJSON(map[string]any{"event": "audit_write_failed", "audit_type": eventType, "error": publicFailureReason(err)})
+	}
 }
 
 func requestRealRunToken(r *http.Request) string {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -74,6 +75,7 @@ type RunStore struct {
 	runsDir    string
 	now        func() time.Time
 	newEventID func() string
+	audit      *AuditStore
 }
 
 type runIndex struct {
@@ -106,6 +108,7 @@ func NewRunStore(repoRoot string) *RunStore {
 		newEventID: func() string {
 			return "run-event-" + fmt.Sprintf("%d", time.Now().UnixNano())
 		},
+		audit: NewAuditStore(cleanRoot),
 	}
 }
 
@@ -147,6 +150,9 @@ func (store *RunStore) StartRun(start RunStart) (RunRecord, error) {
 		return RunRecord{}, err
 	}
 	if err := store.writeIndex(index); err != nil {
+		return RunRecord{}, err
+	}
+	if err := store.auditRunLifecycle("run_started", record); err != nil {
 		return RunRecord{}, err
 	}
 	return record, nil
@@ -243,7 +249,52 @@ func (store *RunStore) transitionRun(runID string, to RunStatus, eventType strin
 	if err := store.appendEvent(event); err != nil {
 		return err
 	}
-	return store.writeIndex(index)
+	if err := store.writeIndex(index); err != nil {
+		return err
+	}
+	return store.auditRunLifecycle(eventType, record)
+}
+
+func (store *RunStore) auditRunLifecycle(eventType string, record RunRecord) error {
+	if store.audit == nil {
+		return nil
+	}
+	auditType := ""
+	outcome := "success"
+	switch eventType {
+	case "run_started":
+		auditType = AuditTypeRunStarted
+	case "run_finished":
+		auditType = AuditTypeRunFinished
+	case "run_failed":
+		auditType = AuditTypeRunFinished
+		outcome = "failure"
+	case "run_interrupted":
+		auditType = AuditTypeRunInterrupted
+		outcome = "interrupted"
+	case "run_cancelled":
+		auditType = AuditTypeRunFinished
+		outcome = "cancelled"
+	default:
+		return nil
+	}
+	// Lifecycle audits preserve security-relevant run status without copying node output.
+	return store.audit.Append(AuditEvent{
+		Type:       auditType,
+		RunID:      record.RunID,
+		WorkflowID: record.WorkflowID,
+		Actor:      AuditActorLocalBrowser,
+		Outcome:    outcome,
+		Details: map[string]string{
+			"mode":               record.Mode,
+			"status":             string(record.Status),
+			"node_total":         strconv.Itoa(record.NodeCounts.Total),
+			"completed_nodes":    strconv.Itoa(record.NodeCounts.Completed),
+			"failed_nodes":       strconv.Itoa(record.NodeCounts.Failed),
+			"skipped_nodes":      strconv.Itoa(record.NodeCounts.Skipped),
+			"arguments_redacted": strconv.FormatBool(record.ArgumentsRedacted),
+		},
+	})
 }
 
 func (store *RunStore) ensureReady() error {

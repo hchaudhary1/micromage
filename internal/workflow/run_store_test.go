@@ -24,6 +24,7 @@ func TestRunStoreStartAndFinishWritesIndexAndEvents(t *testing.T) {
 		return next
 	}
 	store.newEventID = sequenceEventID()
+	store.audit.newEventID = sequenceAuditID()
 
 	_, err := store.StartRun(RunStart{
 		RunID:             "run-1",
@@ -70,6 +71,17 @@ func TestRunStoreStartAndFinishWritesIndexAndEvents(t *testing.T) {
 	if events[1].FromStatus != RunStatusRunning || events[1].ToStatus != RunStatusSucceeded {
 		t.Fatalf("expected terminal transition in event: %#v", events[1])
 	}
+
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 2 || auditEvents[0].Type != AuditTypeRunStarted || auditEvents[1].Type != AuditTypeRunFinished {
+		t.Fatalf("unexpected audit events: %#v", auditEvents)
+	}
+	if auditEvents[0].RunID != "run-1" || auditEvents[0].WorkflowID != "review-last-commit" || auditEvents[0].Details["arguments_redacted"] != "true" {
+		t.Fatalf("unexpected run_started audit event: %#v", auditEvents[0])
+	}
+	if auditEvents[1].Outcome != "success" || auditEvents[1].Details["completed_nodes"] != "1" {
+		t.Fatalf("unexpected run_finished audit event: %#v", auditEvents[1])
+	}
 }
 
 func TestRunStoreFailureAndInterruptionUpdateLifecycle(t *testing.T) {
@@ -77,6 +89,7 @@ func TestRunStoreFailureAndInterruptionUpdateLifecycle(t *testing.T) {
 	store := NewRunStore(repo)
 	store.now = fixedClock(time.Date(2026, 6, 12, 2, 0, 0, 0, time.UTC))
 	store.newEventID = sequenceEventID()
+	store.audit.newEventID = sequenceAuditID()
 
 	if _, err := store.StartRun(RunStart{RunID: "run-failed", WorkflowID: "wf", WorkflowName: "Workflow", Mode: "real", CWD: repo, ArtifactsDir: DefaultArtifactsDir(repo, "run-failed"), NodeTotal: 3}); err != nil {
 		t.Fatalf("StartRun failed: %v", err)
@@ -107,6 +120,13 @@ func TestRunStoreFailureAndInterruptionUpdateLifecycle(t *testing.T) {
 	events := readRunEventLines(t, repo)
 	if len(events) != 4 || events[1].Type != "run_failed" || events[3].Type != "run_interrupted" {
 		t.Fatalf("unexpected lifecycle events: %#v", events)
+	}
+	auditEvents := readAuditEventLines(t, repo)
+	if len(auditEvents) != 4 || auditEvents[1].Type != AuditTypeRunFinished || auditEvents[1].Outcome != "failure" || auditEvents[3].Type != AuditTypeRunInterrupted {
+		t.Fatalf("unexpected audit lifecycle events: %#v", auditEvents)
+	}
+	if strings.Contains(readAuditFile(t, repo), strings.Repeat("x", 20)) {
+		t.Fatalf("audit lifecycle events should not copy failure reason text: %s", readAuditFile(t, repo))
 	}
 }
 

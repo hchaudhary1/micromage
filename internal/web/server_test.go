@@ -570,7 +570,9 @@ func TestRunEndpointRejectsRealModeWhenTokenIsNotConfigured(t *testing.T) {
 func TestRunEndpointRejectsRealModeWithMissingOrWrongToken(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
 	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
-	server := newTestServer(t)
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
 	body := `{"yaml": "name: test\ndescription: test\nnodes:\n  - id: plan\n    bash: echo ok\n", "mode": "real"}`
 
 	missing := postJSON(server, "/api/run", body)
@@ -578,6 +580,59 @@ func TestRunEndpointRejectsRealModeWithMissingOrWrongToken(t *testing.T) {
 
 	wrong := postJSONWithToken(server, "/api/run", body, "wrong")
 	assertPlainHTTPError(t, wrong, http.StatusUnauthorized)
+
+	events := readWebAuditEvents(t, dir)
+	if len(events) != 2 || events[0].Type != workflow.AuditTypeRealRunRejected || events[1].Type != workflow.AuditTypeRealRunRejected {
+		t.Fatalf("expected real-run rejection audit events, got %#v", events)
+	}
+	if events[0].Details["reason"] != "token_mismatch" || events[1].Details["reason"] != "token_mismatch" {
+		t.Fatalf("expected safe token mismatch reason, got %#v", events)
+	}
+	if raw := readWebAuditFile(t, dir); strings.Contains(raw, "secret") || strings.Contains(raw, "wrong") || strings.Contains(raw, "Authorization") {
+		t.Fatalf("authorization audit leaked token/header material: %s", raw)
+	}
+}
+
+func TestRunEndpointAuditsRealRunAuthorizationAndLifecycleWithoutSecrets(t *testing.T) {
+	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
+	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "authorization-secret")
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	server.nextRunID = func() string { return "run-audit-real" }
+	input := `name: audit-real
+description: audit real
+nodes:
+  - id: plan
+    bash: echo ok
+`
+
+	response := postJSONWithToken(server, "/api/run", `{"mode":"real","arguments":"argument secret","yaml": `+strconvQuote(input)+`}`, "authorization-secret")
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected real run to stream, got %d with %q", response.Code, response.Body.String())
+	}
+	events := readWebAuditEvents(t, dir)
+	gotTypes := auditEventTypes(events)
+	wantTypes := []string{workflow.AuditTypeRealRunAuthorized, workflow.AuditTypeRunStarted, workflow.AuditTypeRunFinished}
+	if strings.Join(gotTypes, ",") != strings.Join(wantTypes, ",") {
+		t.Fatalf("expected audit types %v, got %v from %#v", wantTypes, gotTypes, events)
+	}
+	if events[0].Outcome != "success" || events[0].Details["mode"] != "real" {
+		t.Fatalf("unexpected authorization audit event: %#v", events[0])
+	}
+	if events[1].RunID != "run-audit-real" || events[1].WorkflowID != "audit-real" || events[1].Details["arguments_redacted"] != "true" {
+		t.Fatalf("unexpected run_started audit event: %#v", events[1])
+	}
+	if events[2].Outcome != "success" || events[2].Details["status"] != string(workflow.RunStatusSucceeded) {
+		t.Fatalf("unexpected run_finished audit event: %#v", events[2])
+	}
+	raw := readWebAuditFile(t, dir)
+	for _, leaked := range []string{"authorization-secret", "argument secret", "Bearer", "Authorization"} {
+		if strings.Contains(raw, leaked) {
+			t.Fatalf("real-run audit leaked sensitive content %q in %s", leaked, raw)
+		}
+	}
 }
 
 func TestRunEndpointRejectsRealModeFromRemoteHost(t *testing.T) {
@@ -659,13 +714,15 @@ func TestRunEndpointRejectsInvalidWorkflow(t *testing.T) {
 func TestRunEndpointRejectsUnsupportedRealNodeKindsBeforeStreaming(t *testing.T) {
 	t.Setenv("MICROMAGE_ENABLE_REAL_RUNS", "1")
 	t.Setenv("MICROMAGE_REAL_RUN_TOKEN", "secret")
-	server := newTestServer(t)
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
 	input := `name: real-kinds
 description: real kinds
 nodes:
   - id: approval-step
     approval:
-      prompt: Continue?
+      prompt: sensitive approval prompt
   - id: cancel-step
     cancel: stop now
   - id: loop-step
@@ -697,6 +754,18 @@ nodes:
 		if !previewContainsNodeIssue(preview, want.nodeID, want.field, want.kind) {
 			t.Fatalf("expected unsupported %s issue for %s, got %#v", want.kind, want.nodeID, preview.Issues)
 		}
+	}
+	events := readWebAuditEvents(t, dir)
+	gotTypes := auditEventTypes(events)
+	wantTypes := []string{workflow.AuditTypeRealRunAuthorized, workflow.AuditTypeRealRunRejected}
+	if strings.Join(gotTypes, ",") != strings.Join(wantTypes, ",") {
+		t.Fatalf("expected authorized then validation rejection audit, got %#v", events)
+	}
+	if events[1].Details["reason"] != "validation_failed" {
+		t.Fatalf("expected validation failure reason without prompt contents, got %#v", events[1])
+	}
+	if raw := readWebAuditFile(t, dir); strings.Contains(raw, "sensitive approval prompt") || strings.Contains(raw, "secret") {
+		t.Fatalf("real preflight audit leaked sensitive content: %s", raw)
 	}
 }
 
@@ -996,6 +1065,40 @@ func readDurableRunIndex(t *testing.T, dir string) struct {
 		t.Fatalf("decode durable run index: %v", err)
 	}
 	return index
+}
+
+func readWebAuditEvents(t *testing.T, dir string) []workflow.AuditEvent {
+	t.Helper()
+	data := readWebAuditFile(t, dir)
+	var events []workflow.AuditEvent
+	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
+		if line == "" {
+			continue
+		}
+		var event workflow.AuditEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("decode audit event %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func readWebAuditFile(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ".micromage", "audit.jsonl"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	return string(data)
+}
+
+func auditEventTypes(events []workflow.AuditEvent) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.Type)
+	}
+	return out
 }
 
 type requestOptions struct {

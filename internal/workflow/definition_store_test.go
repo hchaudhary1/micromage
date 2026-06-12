@@ -148,6 +148,48 @@ nodes:
 	}
 }
 
+func TestDefinitionStoreAuditsWorkflowAndTemplateSavesWithoutYAML(t *testing.T) {
+	repo := t.TempDir()
+	store := NewDefinitionStore(repo)
+	store.now = fixedClock(time.Date(2026, 6, 12, 6, 45, 0, 0, time.UTC))
+	store.audit.now = fixedClock(time.Date(2026, 6, 12, 6, 45, 1, 0, time.UTC))
+	store.audit.newEventID = sequenceAuditID()
+
+	if _, err := store.SaveWorkflow("audited-flow", `name: Audited Flow
+description: Audited workflow
+nodes:
+  - id: plan
+    prompt: workflow prompt secret
+`); err != nil {
+		t.Fatalf("SaveWorkflow returned error: %v", err)
+	}
+	if _, err := store.SaveTemplate("audited-template", `name: Audited Template
+description: Audited template
+nodes:
+  - id: plan
+    prompt: template prompt secret
+`); err != nil {
+		t.Fatalf("SaveTemplate returned error: %v", err)
+	}
+
+	events := readAuditEventLines(t, repo)
+	if len(events) != 2 || events[0].Type != AuditTypeWorkflowSaved || events[1].Type != AuditTypeTemplateSaved {
+		t.Fatalf("expected workflow/template save audit events, got %#v", events)
+	}
+	if events[0].WorkflowID != "audited-flow" || events[0].Details["kind"] != DefinitionKindWorkflow {
+		t.Fatalf("unexpected workflow save audit event: %#v", events[0])
+	}
+	if events[1].WorkflowID != "audited-template" || events[1].Details["kind"] != DefinitionKindTemplate {
+		t.Fatalf("unexpected template save audit event: %#v", events[1])
+	}
+	raw := readAuditFile(t, repo)
+	for _, leaked := range []string{"workflow prompt secret", "template prompt secret", "Audited workflow", "Audited template"} {
+		if strings.Contains(raw, leaked) {
+			t.Fatalf("audit log leaked saved definition content %q in %s", leaked, raw)
+		}
+	}
+}
+
 func TestDefinitionStoreIndexRewriteIsAtomicOnRenameFailure(t *testing.T) {
 	repo := t.TempDir()
 	store := NewDefinitionStore(repo)
