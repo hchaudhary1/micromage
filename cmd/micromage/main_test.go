@@ -156,6 +156,23 @@ func TestResolveCommandDirFromWorkflowPath(t *testing.T) {
 	}
 }
 
+func TestResolveCommandDirFromVendoredAssets(t *testing.T) {
+	root := t.TempDir()
+	workflowDir := filepath.Join(root, "assets", "defaults", "workflows")
+	commandDir := filepath.Join(root, "assets", "defaults", "commands")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveCommandDir("", filepath.Join(workflowDir, "micromage-assist.yaml"))
+	if got != commandDir {
+		t.Fatalf("got %q, want %q", got, commandDir)
+	}
+}
+
 func TestExecuteApproveAndResumeSkipsCompletedNodes(t *testing.T) {
 	dir := t.TempDir()
 	workflowPath := filepath.Join(dir, "workflow.yaml")

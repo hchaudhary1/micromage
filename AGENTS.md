@@ -5,6 +5,7 @@
 - Golang libraries are allowed when they fit the project
 - these 2 are similar project: `/Users/hassan/Documents/EXAMPLE-1-node-workflows`, `/Users/hassan/Documents/EXAMPLE-2-kanban-workflows`.. Use them as a reference project to understand how they did things, when planing and making our own features.
 - manage project backlog, discovered technical follow-ups, and next steps via `bd`
+- after completing a feature or task, run the quality gates and make a git commit for the completed work. if the user explicitly says not to commit, that direct instruction wins.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

@@ -314,6 +314,10 @@ func resolveCommandDir(commandDir, workflowPath string) string {
 		return commandDir
 	}
 	defaultsDir := filepath.Dir(workflowPath)
+	assetCandidate := filepath.Join(filepath.Dir(defaultsDir), "commands")
+	if stat, err := os.Stat(assetCandidate); err == nil && stat.IsDir() {
+		return assetCandidate
+	}
 	workflowsDir := filepath.Dir(defaultsDir)
 	rootDir := filepath.Dir(workflowsDir)
 	candidate := filepath.Join(rootDir, "commands", "defaults")

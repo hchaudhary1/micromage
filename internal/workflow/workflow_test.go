@@ -193,9 +193,84 @@ func TestParseReferenceDefaultWorkflows(t *testing.T) {
 	}
 }
 
+func TestDefaultCommandTemplatesAreVendored(t *testing.T) {
+	entries, err := os.ReadDir(referenceCommandsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
+			count++
+		}
+	}
+	if count != 36 {
+		t.Fatalf("found %d default command templates, want 36", count)
+	}
+}
+
+func TestDefaultWorkflowCommandReferencesResolveLocally(t *testing.T) {
+	workflowEntries, err := os.ReadDir(referenceDefaultsDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandDir := referenceCommandsDir()
+	for _, entry := range workflowEntries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+			continue
+		}
+		path := filepath.Join(referenceDefaultsDir(), entry.Name())
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf, parseErr := Parse(f)
+		closeErr := f.Close()
+		if parseErr != nil {
+			t.Fatalf("%s failed to parse: %v", entry.Name(), parseErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		for id, node := range wf.Nodes {
+			if node.Type != NodeAgent || strings.TrimSpace(node.Command) == "" {
+				continue
+			}
+			templatePath := filepath.Join(commandDir, node.Command+".md")
+			if _, err := os.Stat(templatePath); err != nil {
+				t.Fatalf("%s node %s references missing template %s", entry.Name(), id, templatePath)
+			}
+		}
+	}
+}
+
 func referenceDefaultsDir() string {
 	if dir := os.Getenv("MICROMAGE_REFERENCE_DEFAULTS"); dir != "" {
 		return dir
 	}
-	return filepath.Join("/Users/hassan/Documents/EXAMPLE-1-node-workflows", "."+"ar"+"chon", "workflows", "defaults")
+	return filepath.Join(repoRootFromCwd(), "assets", "defaults", "workflows")
+}
+
+func referenceCommandsDir() string {
+	if dir := os.Getenv("MICROMAGE_DEFAULT_COMMANDS"); dir != "" {
+		return dir
+	}
+	return filepath.Join(repoRootFromCwd(), "assets", "defaults", "commands")
+}
+
+func repoRootFromCwd() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "."
+		}
+		dir = parent
+	}
 }

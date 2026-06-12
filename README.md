@@ -22,7 +22,7 @@ Run agent/template nodes through OpenCode:
 
 ```bash
 go run ./cmd/micromage run \
-  --workflow path/to/workflows/defaults/example.yaml \
+  --workflow assets/defaults/workflows/micromage-assist.yaml \
   --runner provider \
   --provider opencode \
   --model opencode/deepseek-v4-flash-free \
@@ -31,7 +31,10 @@ go run ./cmd/micromage run \
 
 Provider presets render deterministic noninteractive argv/env settings for supported AI CLIs. OpenCode is the default provider and Codex is available with `--provider codex`; override discovery with `--provider-binary /path/to/cli` when a binary is outside `PATH`. Antigravity is only reported by discovery when an `antigravity` CLI is installed locally.
 
-When a workflow sits beside `commands/defaults`, Micromage infers that command-template directory automatically. Override with `--command-dir` when needed.
+Micromage ships with 20 default workflows under `assets/defaults/workflows`
+and 36 command templates under `assets/defaults/commands`. Workflows in this
+layout infer the sibling command-template directory automatically. Override
+with `--command-dir` when needed.
 
 ## Quality
 
@@ -70,7 +73,7 @@ MICROMAGE_OPENCODE_MODEL=opencode/deepseek-v4-flash-free \
 go test -tags opencode_live ./internal/testharness -run TestLiveOpenCodeHarnessProducesEventLog -count=1 -v
 ```
 
-Run the opt-in live OpenCode smoke suite for the local reference defaults:
+Run the opt-in live OpenCode smoke suite for the bundled defaults:
 
 ```bash
 MICROMAGE_OPENCODE_LIVE=1 \

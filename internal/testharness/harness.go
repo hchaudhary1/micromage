@@ -38,7 +38,31 @@ func ReferenceDefaultsDir() string {
 	if dir := os.Getenv("MICROMAGE_REFERENCE_DEFAULTS"); dir != "" {
 		return dir
 	}
-	return filepath.Join("/Users/hassan/Documents/EXAMPLE-1-node-workflows", "."+"ar"+"chon", "workflows", "defaults")
+	return filepath.Join(repoRootFromCwd(), "assets", "defaults", "workflows")
+}
+
+func DefaultCommandsDir() string {
+	if dir := os.Getenv("MICROMAGE_DEFAULT_COMMANDS"); dir != "" {
+		return dir
+	}
+	return filepath.Join(repoRootFromCwd(), "assets", "defaults", "commands")
+}
+
+func repoRootFromCwd() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "."
+		}
+		dir = parent
+	}
 }
 
 func OpenCodeModel() string {
