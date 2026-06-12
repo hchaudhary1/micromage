@@ -64,7 +64,7 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 	var workflowErr error
 	failed := map[string]bool{}
 	failureReasons := map[string]string{}
-	completedAfterFailure := map[string]bool{}
+	toleratedFailures := map[string]bool{}
 
 	for _, layer := range scheduleLayers(workflow.Nodes) {
 		if len(layer.Nodes) == 0 {
@@ -133,10 +133,10 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 			statuses[result.nodeID] = "success"
 		}
 		for _, node := range layer.Nodes {
-			if statuses[node.ID] == "success" {
+			if statuses[node.ID] == "success" && triggerRuleToleratesDependencyFailure(node) {
 				for _, dep := range node.DependsOn {
 					if failed[dep] {
-						completedAfterFailure[dep] = true
+						toleratedFailures[dep] = true
 					}
 				}
 			}
@@ -148,7 +148,7 @@ func Execute(ctx context.Context, workflow Workflow, runner NodeRunner, emit Eve
 	if workflowErr != nil {
 		return workflowErr
 	}
-	if firstErr != nil && hasUntoleratedFailure(failed, completedAfterFailure) {
+	if firstErr != nil && hasUntoleratedFailure(failed, toleratedFailures) {
 		return firstErr
 	}
 	return emitSafe(RunEvent{Type: "workflow_complete", Message: "completed " + workflow.Name})
@@ -189,13 +189,18 @@ func shouldRunNode(node Node, statuses map[string]string) bool {
 	}
 }
 
-func hasUntoleratedFailure(failed map[string]bool, completedAfterFailure map[string]bool) bool {
+func hasUntoleratedFailure(failed map[string]bool, toleratedFailures map[string]bool) bool {
 	for id := range failed {
-		if !completedAfterFailure[id] {
+		if !toleratedFailures[id] {
 			return true
 		}
 	}
 	return false
+}
+
+func triggerRuleToleratesDependencyFailure(node Node) bool {
+	// Review synthesis is allowed to finish with partial inputs; cleanup continuations must preserve failed status.
+	return node.TriggerRule == "one_success"
 }
 
 func oneSuccessSkipError(node Node, statuses map[string]string, failureReasons map[string]string) error {

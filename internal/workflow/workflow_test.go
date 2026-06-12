@@ -444,6 +444,41 @@ nodes:
 	}
 }
 
+func TestExecutePreservesFailureStatusAfterAllDoneContinuation(t *testing.T) {
+	workflow, issues := ParseYAML(`name: cleanup
+description: cleanup after failure
+nodes:
+  - id: build
+    command: build
+  - id: cleanup
+    command: cleanup
+    depends_on: [build]
+    trigger_rule: all_done
+`)
+	if HasErrors(issues) {
+		t.Fatalf("expected valid workflow, got %#v", issues)
+	}
+
+	expected := errors.New("build failed")
+	var events []RunEvent
+	err := Execute(context.Background(), workflow, selectedFailuresRunner{
+		errs: map[string]error{"build": expected},
+	}, func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected upstream failure after all_done cleanup, got %v", err)
+	}
+	if !hasNodeEvent(events, "node_complete", "cleanup") {
+		t.Fatalf("expected all_done cleanup to run after failure, got %#v", events)
+	}
+	if hasNodeEvent(events, "workflow_complete", "") {
+		t.Fatalf("did not expect workflow_complete after upstream failure: %#v", events)
+	}
+}
+
 func TestLoadTemplatesReturnsSortedMetadataAndReadErrors(t *testing.T) {
 	source := fstest.MapFS{
 		"workflows/z-last.yaml":  {Data: []byte("name: Z Last\ndescription: Last\nnodes:\n  - id: z\n    command: z\n")},
