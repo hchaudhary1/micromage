@@ -484,29 +484,53 @@ h1 {
 
 .bottom-panels {
   display: grid;
-  grid-template-columns: minmax(220px, 0.85fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(200px, 0.75fr) minmax(240px, 0.9fr) minmax(320px, 1.1fr);
   border-top: 1px solid var(--line);
   background: var(--paper);
   min-height: 0;
 }
 
 .inspector,
-.run-log {
+.run-log,
+.persistence-panel {
   display: grid;
   grid-template-rows: auto 1fr;
   min-height: 0;
 }
 
-.inspector {
+.inspector,
+.run-log {
   border-right: 1px solid var(--line);
 }
 
 .inspector h3,
-.run-log h3 {
+.run-log h3,
+.persistence-panel h3 {
   margin: 0;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
   font-size: 0.82rem;
+}
+
+.inspector h3,
+.run-log h3 {
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-heading-row button,
+.section-title-row button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.76rem;
 }
 
 .panel-body {
@@ -561,6 +585,130 @@ h1 {
   color: #ffb7c2;
 }
 
+.persistence-body {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.definition-save-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.6fr) minmax(120px, 1fr) auto;
+  gap: 8px;
+}
+
+.definition-save-row select,
+.definition-save-row input {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: var(--paper);
+}
+
+.definition-save-row button {
+  min-height: 34px;
+}
+
+.persistence-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.persistence-columns h4 {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.persistence-list {
+  display: grid;
+  gap: 6px;
+  max-height: 130px;
+  overflow: auto;
+}
+
+.persistence-row {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: var(--ink);
+  text-align: left;
+  font-weight: 800;
+}
+
+.persistence-row small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.persistence-row.status-succeeded {
+  border-color: color-mix(in srgb, var(--green) 32%, var(--line));
+}
+
+.persistence-row.status-failed,
+.persistence-row.status-cancelled {
+  border-color: color-mix(in srgb, var(--rose) 32%, var(--line));
+}
+
+.persistence-row.status-running,
+.persistence-row.status-interrupted {
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
+}
+
+.persistence-empty,
+.persistence-detail {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.persistence-detail {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.persistence-detail dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.persistence-detail dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.persistence-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.persistence-detail ul {
+  margin: 0;
+  padding-left: 16px;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
   .topbar {
     align-items: stretch;
@@ -601,8 +749,14 @@ h1 {
     grid-template-columns: 1fr;
   }
 
-  .inspector {
+  .inspector,
+  .run-log {
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .persistence-columns,
+  .definition-save-row {
+    grid-template-columns: 1fr;
   }
 }

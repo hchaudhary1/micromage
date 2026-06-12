@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,10 @@ func NewServer(assets fs.FS) (*Server, error) {
 	server.mux.HandleFunc("GET /healthz", server.handleHealthz)
 	server.mux.HandleFunc("GET /readyz", server.handleReadyz)
 	server.mux.HandleFunc("GET /api/templates", server.handleTemplates)
+	server.mux.HandleFunc("POST /api/definitions", server.handleSaveDefinition)
+	server.mux.HandleFunc("GET /api/runs", server.handleRuns)
+	server.mux.HandleFunc("POST /api/runs/cleanup/preview", server.handleCleanupPreview)
+	server.mux.HandleFunc("GET /api/runs/{runID}", server.handleRunDetail)
 	server.mux.HandleFunc("POST /api/preview", server.handlePreview)
 	server.mux.HandleFunc("POST /api/run", server.handleRun)
 
@@ -134,6 +139,86 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, templates)
+}
+
+func (s *Server) handleSaveDefinition(w http.ResponseWriter, r *http.Request) {
+	request, ok := readJSONRequest[definitionSaveRequest](w, r)
+	if !ok {
+		return
+	}
+	store := workflow.NewDefinitionStore(s.workingDirectory())
+	var saved workflow.Template
+	var err error
+	switch request.Kind {
+	case workflow.DefinitionKindWorkflow:
+		saved, err = store.SaveWorkflow(request.ID, request.YAML)
+	case workflow.DefinitionKindTemplate:
+		saved, err = store.SaveTemplate(request.ID, request.YAML)
+	default:
+		http.Error(w, "definition kind must be workflow or template", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := workflow.NewRunStore(s.workingDirectory()).ListRuns()
+	if err != nil {
+		s.logJSON(map[string]any{"event": "run_history_list_failed", "error": publicFailureReason(err)})
+		http.Error(w, "could not load run history", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
+	runID := strings.TrimSpace(r.PathValue("runID"))
+	store := workflow.NewRunStore(s.workingDirectory())
+	run, err := store.GetRun(runID)
+	if err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	detail := runDetailResponse{Run: run}
+	manifest, err := readRepoJSONFile[workflow.ArtifactManifest](s.workingDirectory(), run.ManifestPath)
+	if err != nil {
+		s.logJSON(map[string]any{"event": "run_manifest_read_failed", "run_id": run.RunID, "error": publicFailureReason(err)})
+		http.Error(w, "could not load run manifest", http.StatusInternalServerError)
+		return
+	}
+	detail.Manifest = manifest
+	summary, err := readRepoJSONFile[workflow.RunEvent](s.workingDirectory(), run.SummaryPath)
+	if err != nil {
+		s.logJSON(map[string]any{"event": "run_summary_read_failed", "run_id": run.RunID, "error": publicFailureReason(err)})
+		http.Error(w, "could not load run summary", http.StatusInternalServerError)
+		return
+	}
+	detail.Summary = summary
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) handleCleanupPreview(w http.ResponseWriter, r *http.Request) {
+	request, ok := readJSONRequest[cleanupPreviewRequest](w, r)
+	if !ok {
+		return
+	}
+	policy := workflow.CleanupPolicy{
+		DryRun:           true,
+		KeepTerminalRuns: request.KeepTerminalRuns,
+	}
+	if request.OlderThanHours != 0 {
+		policy.OlderThan = time.Duration(request.OlderThanHours) * time.Hour
+	}
+	report, err := workflow.NewRunStore(s.workingDirectory()).CleanupRuns(r.Context(), policy)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, report)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -371,25 +456,91 @@ type yamlRequest struct {
 	Mode      string `json:"mode"`
 }
 
+type definitionSaveRequest struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	YAML string `json:"yaml"`
+}
+
+type cleanupPreviewRequest struct {
+	OlderThanHours   int `json:"older_than_hours"`
+	KeepTerminalRuns int `json:"keep_terminal_runs"`
+}
+
+type runDetailResponse struct {
+	Run      workflow.RunRecord         `json:"run"`
+	Manifest *workflow.ArtifactManifest `json:"manifest,omitempty"`
+	Summary  *workflow.RunEvent         `json:"summary,omitempty"`
+}
+
 func readRunRequest(w http.ResponseWriter, r *http.Request) (yamlRequest, bool) {
+	return readJSONRequest[yamlRequest](w, r)
+}
+
+func readJSONRequest[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
+	var request T
 	defer r.Body.Close()
 	if !hasJSONContentType(r) {
 		http.Error(w, "JSON endpoints require Content-Type: application/json", http.StatusUnsupportedMediaType)
-		return yamlRequest{}, false
+		return request, false
 	}
-	var request yamlRequest
 	// Bound request bodies keep workflow submissions from exhausting server memory.
 	limitedBody := http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := json.NewDecoder(limitedBody).Decode(&request); err != nil {
 		var bodyTooLarge *http.MaxBytesError
 		if errors.As(err, &bodyTooLarge) {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return yamlRequest{}, false
+			return request, false
 		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return yamlRequest{}, false
+		return request, false
 	}
 	return request, true
+}
+
+func readRepoJSONFile[T any](repoRoot string, relativePath string) (*T, error) {
+	if strings.TrimSpace(relativePath) == "" {
+		return nil, nil
+	}
+	path, err := containedRepoPath(repoRoot, relativePath)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var value T
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func containedRepoPath(repoRoot string, relativePath string) (string, error) {
+	root, err := filepath.Abs(filepath.Clean(repoRoot))
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Clean(relativePath)
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	}
+	candidate, err = filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("path is outside repository")
+	}
+	return candidate, nil
 }
 
 func hasJSONContentType(r *http.Request) bool {

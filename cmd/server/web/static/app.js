@@ -16,6 +16,15 @@ const dagSvg = document.querySelector("#dag-svg");
 const fitGraphButton = document.querySelector("#fit-graph-button");
 const inspectorBody = document.querySelector("#inspector-body");
 const runLog = document.querySelector("#run-log");
+const definitionKind = document.querySelector("#definition-kind");
+const definitionID = document.querySelector("#definition-id");
+const saveDefinitionButton = document.querySelector("#save-definition-button");
+const refreshPersistenceButton = document.querySelector("#refresh-persistence-button");
+const cleanupPreviewButton = document.querySelector("#cleanup-preview-button");
+const definitionList = document.querySelector("#definition-list");
+const runHistoryList = document.querySelector("#run-history-list");
+const cleanupPreview = document.querySelector("#cleanup-preview");
+const runDetail = document.querySelector("#run-detail");
 const appState = window.MicromageTemplateState;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -32,13 +41,12 @@ let runStartedAt = 0;
 let runStatusTimer = 0;
 let currentRunNodeId = "";
 let activeRunController = null;
+let templates = [];
 
 async function boot() {
-  const response = await fetch("/api/templates");
-  const templates = await response.json();
-  templateSelect.innerHTML = templates
-    .map((template) => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name || template.id)}</option>`)
-    .join("");
+  templates = await loadTemplates();
+  renderTemplateOptions(templates);
+  renderDefinitionList(templates);
   templateSelect.addEventListener("change", () => {
     // Manual workflow edits need an explicit overwrite decision before template swaps.
     const change = appState.resolveTemplateChange({
@@ -57,6 +65,7 @@ async function boot() {
     currentTemplateID = change.selectedTemplateID;
     templateBaselineYaml = change.baselineYaml;
     yamlEditor.value = change.yaml;
+    definitionID.value = currentTemplateID;
     selectedNodeId = "";
     updatePreview();
   });
@@ -67,6 +76,11 @@ async function boot() {
   runButton.addEventListener("click", runWorkflow);
   cancelRunButton.addEventListener("click", cancelRun);
   fitGraphButton.addEventListener("click", toggleGraphFit);
+  saveDefinitionButton.addEventListener("click", saveDefinition);
+  refreshPersistenceButton.addEventListener("click", refreshPersistence);
+  cleanupPreviewButton.addEventListener("click", previewRunCleanup);
+  definitionList.addEventListener("click", loadDefinitionFromList);
+  runHistoryList.addEventListener("click", loadRunDetailFromList);
   runMode.addEventListener("change", updatePreview);
   issuePanel.addEventListener("click", (event) => {
     const target = event.target.closest?.("[data-node-id]");
@@ -81,7 +95,20 @@ async function boot() {
   templateBaselineYaml = first ? first.yaml : "";
   yamlEditor.value = templateBaselineYaml;
   templateSelect.value = currentTemplateID;
+  definitionID.value = currentTemplateID;
+  await refreshPersistence();
   await updatePreview();
+}
+
+async function loadTemplates() {
+  const response = await fetch("/api/templates");
+  return response.json();
+}
+
+function renderTemplateOptions(items) {
+  templateSelect.innerHTML = items
+    .map((template) => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name || template.id)}</option>`)
+    .join("");
 }
 
 async function updatePreview() {
@@ -116,6 +143,167 @@ function renderPreview(preview) {
   setState(preview.can_run ? "Runnable" : "Invalid", preview.can_run ? "ok" : "error");
   renderGraph(graph);
   renderInspector();
+}
+
+async function refreshPersistence() {
+  templates = await loadTemplates();
+  renderTemplateOptions(templates);
+  if (currentTemplateID) {
+    templateSelect.value = currentTemplateID;
+  }
+  renderDefinitionList(templates);
+  await refreshRunHistory();
+}
+
+async function refreshRunHistory() {
+  const response = await fetch("/api/runs");
+  if (!response.ok) {
+    runHistoryList.textContent = "Run history unavailable";
+    return;
+  }
+  const runs = await response.json();
+  renderRunHistory(runs || []);
+}
+
+function renderDefinitionList(items) {
+  if (!items.length) {
+    definitionList.innerHTML = `<div class="persistence-empty">No saved definitions</div>`;
+    return;
+  }
+  definitionList.innerHTML = items.map(renderDefinitionRow).join("");
+}
+
+function renderDefinitionRow(template) {
+  const source = template.source || "embedded";
+  const kind = template.kind || "workflow";
+  const label = template.name || template.id;
+  const status = template.validation_status || (template.valid ? "valid" : "invalid");
+  return [
+    `<button type="button" class="persistence-row" data-definition-id="${escapeHTML(template.id)}">`,
+    `<span>${escapeHTML(label)}</span>`,
+    `<small>${escapeHTML(source)} ${escapeHTML(kind)} - ${escapeHTML(status)}</small>`,
+    `</button>`,
+  ].join("");
+}
+
+function loadDefinitionFromList(event) {
+  const target = event.target.closest?.("[data-definition-id]");
+  if (!target) return;
+  const template = templates.find((item) => item.id === target.dataset.definitionId);
+  if (!template) return;
+  // Saved definitions load through the same dirty-check path as starter templates.
+  const change = appState.resolveTemplateChange({
+    templates,
+    requestedTemplateID: template.id,
+    previousTemplateID: currentTemplateID,
+    currentYaml: yamlEditor.value,
+    baselineYaml: templateBaselineYaml,
+    confirmOverwrite: () => window.confirm("Load this saved definition and discard your YAML edits?"),
+  });
+  if (!change.accepted) return;
+  currentTemplateID = change.selectedTemplateID;
+  templateBaselineYaml = change.baselineYaml;
+  yamlEditor.value = change.yaml;
+  templateSelect.value = currentTemplateID;
+  definitionID.value = currentTemplateID;
+  selectedNodeId = "";
+  updatePreview();
+}
+
+async function saveDefinition() {
+  const id = (definitionID.value || currentTemplateID || slugID(currentPreview?.workflow?.name) || "workflow").trim();
+  const kind = definitionKind.value || "workflow";
+  const response = await fetch("/api/definitions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, kind, yaml: yamlEditor.value }),
+  });
+  if (!response.ok) {
+    appendLog(`save failed: ${(await response.text()).trim() || response.statusText}`, "log-error");
+    return;
+  }
+  const saved = await response.json();
+  // Browser saves keep edited workflows reusable without shell access to .micromage.
+  currentTemplateID = saved.id;
+  templateBaselineYaml = saved.yaml;
+  definitionID.value = saved.id;
+  appendLog(`saved ${saved.kind || kind} ${saved.id}`, "log-detail");
+  await refreshPersistence();
+  templateSelect.value = currentTemplateID;
+}
+
+function renderRunHistory(runs) {
+  if (!runs.length) {
+    runHistoryList.innerHTML = `<div class="persistence-empty">No runs yet</div>`;
+    return;
+  }
+  runHistoryList.innerHTML = runs.map(renderRunRow).join("");
+}
+
+function renderRunRow(run) {
+  const name = run.workflow_name || run.workflow_id || run.run_id;
+  const status = run.status || "unknown";
+  const started = formatTimestamp(run.started_at || run.created_at);
+  return [
+    `<button type="button" class="persistence-row status-${escapeHTML(status)}" data-run-id="${escapeHTML(run.run_id)}">`,
+    `<span>${escapeHTML(name)}</span>`,
+    `<small>${escapeHTML(status)} - ${escapeHTML(started)}</small>`,
+    `</button>`,
+  ].join("");
+}
+
+async function loadRunDetailFromList(event) {
+  const target = event.target.closest?.("[data-run-id]");
+  if (!target) return;
+  await showRunDetail(target.dataset.runId);
+}
+
+async function showRunDetail(runID) {
+  const response = await fetch(`/api/runs/${encodeURIComponent(runID)}`);
+  if (!response.ok) {
+    runDetail.textContent = "Run detail unavailable";
+    runDetail.classList.add("muted");
+    return;
+  }
+  renderRunDetail(await response.json());
+}
+
+function renderRunDetail(detail) {
+  const run = detail.run || {};
+  const manifest = detail.manifest;
+  const summary = detail.summary;
+  const artifacts = manifest?.artifacts || summary?.artifacts || [];
+  const artifactRows = artifacts.length
+    ? artifacts.map((artifact) => `<li>${escapeHTML(artifact.node_id || artifact.nodeID || "artifact")}: ${escapeHTML(artifact.path || "")}${artifact.size_bytes ? ` (${artifact.size_bytes} bytes)` : ""}</li>`).join("")
+    : "<li>No artifacts recorded</li>";
+  runDetail.classList.remove("muted");
+  runDetail.innerHTML = [
+    `<strong>${escapeHTML(run.run_id || "Run")}</strong>`,
+    `<dl>`,
+    `<dt>Status</dt><dd>${escapeHTML(run.status || "unknown")}</dd>`,
+    `<dt>Workflow</dt><dd>${escapeHTML(run.workflow_name || run.workflow_id || "unknown")}</dd>`,
+    `<dt>Artifacts</dt><dd>${escapeHTML(run.artifacts_dir || "not recorded")}</dd>`,
+    `</dl>`,
+    `<ul>${artifactRows}</ul>`,
+  ].join("");
+}
+
+async function previewRunCleanup() {
+  const response = await fetch("/api/runs/cleanup/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const report = await response.json();
+  renderCleanupPreview(report);
+}
+
+function renderCleanupPreview(report) {
+  const candidates = report.candidates || [];
+  cleanupPreview.classList.remove("muted");
+  cleanupPreview.innerHTML = candidates.length
+    ? `<strong>${candidates.length} cleanup candidate${candidates.length === 1 ? "" : "s"}</strong><ul>${candidates.map((run) => `<li>${escapeHTML(run.run_id)} - ${escapeHTML(run.status)} - ${escapeHTML(run.artifacts_dir || "")}</li>`).join("")}</ul>`
+    : "<strong>No cleanup candidates</strong>";
 }
 
 function normalizedGraph(graph) {
@@ -318,6 +506,7 @@ async function runWorkflow() {
       runStatus.textContent = "No run active";
     }
     runButton.disabled = !currentPreview?.can_run;
+    refreshRunHistory().catch((error) => appendLog(error.message, "log-error"));
   }
 }
 
@@ -495,6 +684,21 @@ function formatElapsed(milliseconds) {
 
 function isAbortError(error) {
   return error?.name === "AbortError";
+}
+
+function formatTimestamp(value) {
+  if (!value) return "not started";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function slugID(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function edgePath(source, target) {

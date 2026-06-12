@@ -91,8 +91,18 @@ async function bootHarness(options) {
     "#fit-graph-button": makeElement(),
     "#inspector-body": makeElement(),
     "#run-log": makeElement(),
+    "#definition-kind": makeElement(),
+    "#definition-id": makeElement(),
+    "#save-definition-button": makeElement(),
+    "#refresh-persistence-button": makeElement(),
+    "#cleanup-preview-button": makeElement(),
+    "#definition-list": makeElement(),
+    "#run-history-list": makeElement(),
+    "#cleanup-preview": makeElement(),
+    "#run-detail": makeElement(),
   };
   elements["#run-mode"].value = options.mode || "simulate";
+  elements["#definition-kind"].value = "workflow";
 
   const templates = [{ id: "starter", name: "Starter", yaml: options.yaml || "name: starter\nnodes: []\n" }];
   const preview = options.preview || runnablePreview();
@@ -129,6 +139,15 @@ async function bootHarness(options) {
     }
     if (url === "/api/run") {
       return options.runResponse;
+    }
+    if (url === "/api/runs") {
+      return response({ body: [] });
+    }
+    if (url === "/api/runs/cleanup/preview") {
+      return response({ body: { dry_run: true, candidates: [], deleted: [], failed: [] } });
+    }
+    if (url === "/api/definitions") {
+      return response({ body: { id: body.id, name: body.id, yaml: body.yaml, source: "project", kind: body.kind, valid: true } });
     }
     throw new Error(`unexpected fetch ${url}`);
   };

@@ -64,6 +64,37 @@
             <h3>Run log</h3>
             <div id="run-log" class="panel-body log-lines"></div>
           </section>
+          <section class="persistence-panel" aria-label="Persistence">
+            <div class="panel-heading-row">
+              <h3>Persistence</h3>
+              <button id="refresh-persistence-button" type="button">Refresh</button>
+            </div>
+            <div class="panel-body persistence-body">
+              <div class="definition-save-row">
+                <select id="definition-kind" aria-label="Save kind">
+                  <option value="workflow">Workflow</option>
+                  <option value="template">Template</option>
+                </select>
+                <input id="definition-id" type="text" aria-label="Save ID" placeholder="workflow-id">
+                <button id="save-definition-button" type="button">Save</button>
+              </div>
+              <div class="persistence-columns">
+                <section aria-label="Saved workflows and templates">
+                  <h4>Saved</h4>
+                  <div id="definition-list" class="persistence-list"></div>
+                </section>
+                <section aria-label="Run history">
+                  <div class="section-title-row">
+                    <h4>Runs</h4>
+                    <button id="cleanup-preview-button" type="button">Cleanup Preview</button>
+                  </div>
+                  <div id="run-history-list" class="persistence-list"></div>
+                </section>
+              </div>
+              <div id="cleanup-preview" class="persistence-detail muted">No cleanup preview</div>
+              <div id="run-detail" class="persistence-detail muted">Select a run</div>
+            </div>
+          </section>
         </div>
       </section>
     </main>

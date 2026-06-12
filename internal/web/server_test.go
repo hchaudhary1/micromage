@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"micromage/internal/workflow"
 )
@@ -101,6 +102,162 @@ nodes:
 	saved := findTemplate(t, templates, "saved-template")
 	if saved.Source != workflow.DefinitionSourceProject || saved.Kind != workflow.DefinitionKindTemplate || !saved.Valid {
 		t.Fatalf("expected project saved template, got %#v", saved)
+	}
+}
+
+func TestDefinitionSaveEndpointCreatesAndUpdatesProjectDefinitions(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+
+	workflowYAML := `name: Saved Browser Workflow
+description: Saved from browser
+nodes:
+  - id: plan
+    prompt: Plan from browser.
+`
+	response := postJSON(server, "/api/definitions", `{"id":"browser-flow","kind":"workflow","yaml":`+strconvQuote(workflowYAML)+`}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
+	}
+	var savedWorkflow workflow.Template
+	if err := json.NewDecoder(response.Body).Decode(&savedWorkflow); err != nil {
+		t.Fatalf("decode saved workflow: %v", err)
+	}
+	if savedWorkflow.ID != "browser-flow" || savedWorkflow.Source != workflow.DefinitionSourceProject || savedWorkflow.Kind != workflow.DefinitionKindWorkflow {
+		t.Fatalf("unexpected saved workflow: %#v", savedWorkflow)
+	}
+
+	templateYAML := `name: Saved Browser Template
+description: Updated from browser
+nodes:
+  - id: draft
+    prompt: Draft from browser.
+`
+	response = postJSON(server, "/api/definitions", `{"id":"browser-template","kind":"template","yaml":`+strconvQuote(templateYAML)+`}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with %q", response.Code, response.Body.String())
+	}
+
+	updatedTemplateYAML := strings.Replace(templateYAML, "Updated from browser", "Updated again", 1)
+	response = postJSON(server, "/api/definitions", `{"id":"browser-template","kind":"template","yaml":`+strconvQuote(updatedTemplateYAML)+`}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected update 200, got %d with %q", response.Code, response.Body.String())
+	}
+
+	list := httptest.NewRecorder()
+	server.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/templates", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected templates 200, got %d with %q", list.Code, list.Body.String())
+	}
+	var templates []workflow.Template
+	if err := json.NewDecoder(list.Body).Decode(&templates); err != nil {
+		t.Fatalf("decode templates: %v", err)
+	}
+	saved := findTemplate(t, templates, "browser-template")
+	if saved.Source != workflow.DefinitionSourceProject || saved.Kind != workflow.DefinitionKindTemplate || !strings.Contains(saved.YAML, "Updated again") {
+		t.Fatalf("expected updated project template in list, got %#v", saved)
+	}
+}
+
+func TestRunHistoryAPIsExposeRunsManifestAndSummary(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	runID := "run-history"
+	store := workflow.NewRunStore(dir)
+	if _, err := store.StartRun(workflow.RunStart{
+		RunID:        runID,
+		WorkflowID:   "browser-flow",
+		WorkflowName: "Browser Flow",
+		Mode:         "real",
+		CWD:          dir,
+		ArtifactsDir: workflow.DefaultArtifactsDir(dir, runID),
+		NodeTotal:    1,
+	}); err != nil {
+		t.Fatalf("StartRun returned error: %v", err)
+	}
+	artifactPath := filepath.Join(dir, ".micromage", "runs", runID, "plan.md")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("artifact body"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	summary := workflow.RunEvent{
+		Type:           "run_summary",
+		RunID:          runID,
+		ArtifactsDir:   workflow.DefaultArtifactsDir(dir, runID),
+		Artifacts:      []workflow.RunArtifact{{NodeID: "plan", Path: artifactPath}},
+		CompletedNodes: []string{"plan"},
+	}
+	if err := workflow.WriteRunArtifactManifest(workflow.RunArtifactManifestWrite{
+		RepoRoot:     dir,
+		RunID:        runID,
+		WorkflowID:   "browser-flow",
+		ArtifactsDir: workflow.DefaultArtifactsDir(dir, runID),
+		WorkflowYAML: "name: Browser Flow\nnodes:\n  - id: plan\n    prompt: Plan\n",
+		Summary:      summary,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteRunArtifactManifest returned error: %v", err)
+	}
+	if err := store.FinishRun(runID, workflow.RunResult{CompletedNodes: []string{"plan"}}); err != nil {
+		t.Fatalf("FinishRun returned error: %v", err)
+	}
+
+	list := httptest.NewRecorder()
+	server.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("expected runs 200, got %d with %q", list.Code, list.Body.String())
+	}
+	var runs []workflow.RunRecord
+	if err := json.NewDecoder(list.Body).Decode(&runs); err != nil {
+		t.Fatalf("decode runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != runID || runs[0].Status != workflow.RunStatusSucceeded {
+		t.Fatalf("unexpected runs response: %#v", runs)
+	}
+
+	detailResponse := httptest.NewRecorder()
+	server.ServeHTTP(detailResponse, httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil))
+	if detailResponse.Code != http.StatusOK {
+		t.Fatalf("expected run detail 200, got %d with %q", detailResponse.Code, detailResponse.Body.String())
+	}
+	var detail runDetailResponse
+	if err := json.NewDecoder(detailResponse.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode run detail: %v", err)
+	}
+	if detail.Run.RunID != runID || detail.Manifest == nil || detail.Summary == nil {
+		t.Fatalf("expected run, manifest, and summary, got %#v", detail)
+	}
+	if len(detail.Manifest.Artifacts) != 1 || detail.Manifest.Artifacts[0].Path != "plan.md" || detail.Summary.RunID != runID {
+		t.Fatalf("unexpected artifact detail: %#v", detail)
+	}
+}
+
+func TestCleanupPreviewEndpointReportsCandidates(t *testing.T) {
+	server := newTestServer(t).(*Server)
+	dir := t.TempDir()
+	server.workingDirectory = func() string { return dir }
+	now := time.Now().UTC()
+	oldFinished := now.Add(-48 * time.Hour)
+	recentFinished := now.Add(-30 * time.Minute)
+	writeWebRunIndex(t, dir, []workflow.RunRecord{
+		webRunRecord(dir, "run-old", workflow.RunStatusFailed, oldFinished),
+		webRunRecord(dir, "run-recent", workflow.RunStatusSucceeded, recentFinished),
+	})
+
+	response := postJSON(server, "/api/runs/cleanup/preview", `{"older_than_hours":24,"keep_terminal_runs":1}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected cleanup preview 200, got %d with %q", response.Code, response.Body.String())
+	}
+	var report workflow.CleanupReport
+	if err := json.NewDecoder(response.Body).Decode(&report); err != nil {
+		t.Fatalf("decode cleanup report: %v", err)
+	}
+	if !report.DryRun || len(report.Candidates) != 1 || report.Candidates[0].RunID != "run-old" || len(report.Deleted) != 0 {
+		t.Fatalf("unexpected cleanup preview report: %#v", report)
 	}
 }
 
@@ -1270,6 +1427,46 @@ func graphNodeLayer(nodes []workflow.NodeView, id string) int {
 		}
 	}
 	return -1
+}
+
+func writeWebRunIndex(t *testing.T, repo string, runs []workflow.RunRecord) {
+	t.Helper()
+	runsDir := filepath.Join(repo, ".micromage", "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatalf("create runs dir: %v", err)
+	}
+	data, err := json.MarshalIndent(struct {
+		SchemaVersion int                  `json:"schema_version"`
+		Runs          []workflow.RunRecord `json:"runs"`
+	}{SchemaVersion: 1, Runs: runs}, "", "  ")
+	if err != nil {
+		t.Fatalf("encode run index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runsDir, "index.json"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write run index: %v", err)
+	}
+}
+
+func webRunRecord(repo string, runID string, status workflow.RunStatus, finished time.Time) workflow.RunRecord {
+	created := finished.Add(-time.Minute)
+	duration := int64(time.Minute / time.Millisecond)
+	return workflow.RunRecord{
+		SchemaVersion: 1,
+		RunID:         runID,
+		WorkflowID:    "wf",
+		WorkflowName:  "Workflow",
+		Mode:          "real",
+		Status:        status,
+		CreatedAt:     created,
+		StartedAt:     &created,
+		FinishedAt:    &finished,
+		DurationMS:    &duration,
+		CWD:           repo,
+		ArtifactsDir:  filepath.Join(".micromage", "runs", runID),
+		NodeCounts:    workflow.RunNodeCounts{Total: 1, Completed: 1},
+		ManifestPath:  filepath.Join(".micromage", "runs", runID, "manifest.json"),
+		SummaryPath:   filepath.Join(".micromage", "runs", runID, "summary.json"),
+	}
 }
 
 func strconvQuote(value string) string {

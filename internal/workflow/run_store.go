@@ -293,6 +293,34 @@ func (store *RunStore) CleanupRuns(ctx context.Context, policy CleanupPolicy) (C
 	return report, nil
 }
 
+func (store *RunStore) ListRuns() ([]RunRecord, error) {
+	if err := store.ensureReady(); err != nil {
+		return nil, err
+	}
+	index, err := store.readIndex()
+	if err != nil {
+		return nil, err
+	}
+	runs := append([]RunRecord(nil), index.Runs...)
+	sortRunIndex(runs)
+	return runs, nil
+}
+
+func (store *RunStore) GetRun(runID string) (RunRecord, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return RunRecord{}, errors.New("run id is required")
+	}
+	runs, err := store.ListRuns()
+	if err != nil {
+		return RunRecord{}, err
+	}
+	if position, ok := findRun(runs, runID); ok {
+		return runs[position], nil
+	}
+	return RunRecord{}, fmt.Errorf("run %s was not found", runID)
+}
+
 func ValidateRunTransition(from RunStatus, to RunStatus) error {
 	allowed := map[RunStatus]map[RunStatus]struct{}{
 		RunStatusQueued: {

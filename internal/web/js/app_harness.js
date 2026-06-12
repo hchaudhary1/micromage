@@ -78,6 +78,15 @@ function appElements() {
     "#fit-graph-button": makeElement("button"),
     "#inspector-body": makeElement("div"),
     "#run-log": makeElement("div"),
+    "#definition-kind": makeElement("select"),
+    "#definition-id": makeElement("input"),
+    "#save-definition-button": makeElement("button"),
+    "#refresh-persistence-button": makeElement("button"),
+    "#cleanup-preview-button": makeElement("button"),
+    "#definition-list": makeElement("div"),
+    "#run-history-list": makeElement("div"),
+    "#cleanup-preview": makeElement("div"),
+    "#run-detail": makeElement("div"),
   };
 }
 
@@ -131,6 +140,10 @@ async function bootHarness(options = {}) {
 
   const elements = appElements();
   const templates = options.templates || [{ id: "starter", name: "Starter", yaml: "name: starter\nnodes: []\n" }];
+  let currentTemplates = templates;
+  const runs = options.runs || [];
+  const runDetails = options.runDetails || {};
+  const cleanupReport = options.cleanupReport || { dry_run: true, candidates: [], deleted: [], failed: [] };
   const requests = [];
   const confirms = [];
   const timers = [];
@@ -138,6 +151,7 @@ async function bootHarness(options = {}) {
 
   elements["#run-mode"].value = options.mode || "simulate";
   elements["#run-arguments"].value = options.arguments || "";
+  elements["#definition-kind"].value = options.definitionKind || "workflow";
 
   // Browser workflow tests need UI-observable behavior without adding a DOM package dependency.
   global.document = {
@@ -175,7 +189,7 @@ async function bootHarness(options = {}) {
     const body = requestOptions.body ? JSON.parse(requestOptions.body) : null;
     requests.push({ url, body, headers: requestOptions.headers || {}, signal: requestOptions.signal });
     if (url === "/api/templates") {
-      return response({ body: templates });
+      return response({ body: currentTemplates });
     }
     if (url === "/api/preview") {
       const preview = options.previewFor ? options.previewFor(body) : options.preview || runnablePreview();
@@ -186,6 +200,28 @@ async function bootHarness(options = {}) {
         return options.runResponseFor(body, requestOptions);
       }
       return options.runResponse || streamResponse([]);
+    }
+    if (url === "/api/runs") {
+      return response({ body: runs });
+    }
+    if (url.startsWith("/api/runs/") && requestOptions.method !== "POST") {
+      return response({ body: runDetails[decodeURIComponent(url.replace("/api/runs/", ""))] || {} });
+    }
+    if (url === "/api/runs/cleanup/preview") {
+      return response({ body: cleanupReport });
+    }
+    if (url === "/api/definitions") {
+      const saved = options.definitionResponse || {
+        id: body.id,
+        name: body.id,
+        yaml: body.yaml,
+        source: "project",
+        kind: body.kind,
+        valid: true,
+        validation_status: "valid",
+      };
+      currentTemplates = currentTemplates.filter((template) => template.id !== saved.id).concat(saved);
+      return response({ body: saved });
     }
     throw new Error(`unexpected fetch ${url}`);
   };

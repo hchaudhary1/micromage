@@ -323,6 +323,85 @@ async function testPreviewChangeCancelsActiveRunStream() {
   assert.equal(elements["#run-button"].disabled, false);
 }
 
+async function testPersistencePanelShowsRunDetailAndCleanupPreview() {
+  const { elements } = await bootHarness({
+    templates: [
+      ...templates,
+      { id: "project-flow", name: "Project Flow", yaml: "name: project\nnodes: []\n", source: "project", kind: "workflow", valid: true },
+    ],
+    previewFor,
+    runs: [
+      {
+        run_id: "run-123",
+        workflow_name: "Review",
+        workflow_id: "review",
+        status: "succeeded",
+        created_at: "2026-06-12T12:00:00Z",
+        started_at: "2026-06-12T12:00:01Z",
+        artifacts_dir: ".micromage/runs/run-123",
+      },
+    ],
+    runDetails: {
+      "run-123": {
+        run: {
+          run_id: "run-123",
+          workflow_name: "Review",
+          workflow_id: "review",
+          status: "succeeded",
+          artifacts_dir: ".micromage/runs/run-123",
+        },
+        manifest: {
+          artifacts: [{ node_id: "plan", path: "plan.md", size_bytes: 42 }],
+        },
+      },
+    },
+    cleanupReport: {
+      dry_run: true,
+      candidates: [{ run_id: "run-old", status: "failed", artifacts_dir: ".micromage/runs/run-old" }],
+      deleted: [],
+      failed: [],
+    },
+  });
+
+  assert.match(elements["#definition-list"].innerHTML, /project workflow - valid/);
+  assert.match(elements["#run-history-list"].innerHTML, /Review/);
+  assert.match(elements["#run-history-list"].innerHTML, /succeeded/);
+
+  await elements["#run-history-list"].listeners.click({
+    target: { closest: () => ({ dataset: { runId: "run-123" } }) },
+  });
+
+  assert.match(elements["#run-detail"].innerHTML, /run-123/);
+  assert.match(elements["#run-detail"].innerHTML, /plan: plan\.md \(42 bytes\)/);
+
+  await elements["#cleanup-preview-button"].listeners.click();
+
+  assert.match(elements["#cleanup-preview"].innerHTML, /1 cleanup candidate/);
+  assert.match(elements["#cleanup-preview"].innerHTML, /run-old/);
+}
+
+async function testSaveDefinitionPostsCurrentYamlAndRefreshesLists() {
+  const { elements, requests } = await bootHarness({
+    templates,
+    previewFor,
+    definitionKind: "template",
+  });
+
+  elements["#definition-id"].value = "browser-template";
+  elements["#definition-kind"].value = "template";
+  elements["#yaml-editor"].value = "name: Saved\nnodes:\n  - id: plan\n    prompt: Save\n";
+
+  await elements["#save-definition-button"].listeners.click();
+
+  const saveRequest = requests.find((request) => request.url === "/api/definitions");
+  assert.equal(saveRequest.body.id, "browser-template");
+  assert.equal(saveRequest.body.kind, "template");
+  assert.match(saveRequest.body.yaml, /name: Saved/);
+  assert.match(logText(elements), /saved template browser-template/);
+  assert.match(elements["#definition-list"].innerHTML, /browser-template/);
+  assert.equal(elements["#template-select"].value, "browser-template");
+}
+
 async function testRunModeSelectionAndRealModeRejection() {
   const { confirms, elements, requests, runPendingTimers } = await bootHarness({
     templates,
@@ -361,6 +440,8 @@ async function main() {
   await testRunStateOverlaysAndStatusContext();
   await testCancelRunAbortsOpenStream();
   await testPreviewChangeCancelsActiveRunStream();
+  await testPersistencePanelShowsRunDetailAndCleanupPreview();
+  await testSaveDefinitionPostsCurrentYamlAndRefreshesLists();
   await testRunModeSelectionAndRealModeRejection();
 }
 

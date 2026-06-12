@@ -58,8 +58,18 @@ async function main() {
     "#fit-graph-button": makeElement(),
     "#inspector-body": makeElement(),
     "#run-log": makeElement(),
+    "#definition-kind": makeElement(),
+    "#definition-id": makeElement(),
+    "#save-definition-button": makeElement(),
+    "#refresh-persistence-button": makeElement(),
+    "#cleanup-preview-button": makeElement(),
+    "#definition-list": makeElement(),
+    "#run-history-list": makeElement(),
+    "#cleanup-preview": makeElement(),
+    "#run-detail": makeElement(),
   };
   elements["#run-mode"].value = "simulate";
+  elements["#definition-kind"].value = "workflow";
 
   const previewRequests = [];
   global.document = {
@@ -92,6 +102,16 @@ async function main() {
           workflow: {},
         }),
       };
+    }
+    if (url === "/api/runs") {
+      return { ok: true, json: async () => [] };
+    }
+    if (url === "/api/runs/cleanup/preview") {
+      return { ok: true, json: async () => ({ dry_run: true, candidates: [], deleted: [], failed: [] }) };
+    }
+    if (url === "/api/definitions") {
+      const body = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ id: body.id, name: body.id, yaml: body.yaml, source: "project", kind: body.kind }) };
     }
     throw new Error(`unexpected fetch ${url}`);
   };
