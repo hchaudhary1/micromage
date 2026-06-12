@@ -44,6 +44,22 @@ go tool cover -func=coverage.out
 
 The project target is at least 70% total code coverage.
 
+## Continuous Integration
+
+GitHub Actions runs the remote CI quality gate on pushes and pull requests. The workflow uses the Go version declared in `go.mod`, runs tests, vet, build, race tests, and the same 70% total coverage threshold as the local pre-commit hook.
+
+The vulnerability scan installs the official Go vulnerability checker in CI with:
+
+```sh
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
+
+Then CI runs:
+
+```sh
+"$(go env GOPATH)/bin/govulncheck" ./...
+```
+
 Run the opt-in local OpenCode smoke test:
 
 ```sh

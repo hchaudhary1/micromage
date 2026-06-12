@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go quality gates
+    runs-on: ubuntu-latest
+    env:
+      MINIMUM_COVERAGE: "70.0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Coverage gate
+        run: |
+          set -euo pipefail
+          coverage_file="$(mktemp)"
+          trap 'rm -f "$coverage_file"' EXIT
+
+          go test ./... -coverprofile="$coverage_file"
+          total_coverage="$(go tool cover -func="$coverage_file" | awk '/^total:/ { sub(/%/, "", $3); print $3 }')"
+
+          if [ -z "$total_coverage" ]; then
+            echo "Could not determine total coverage." >&2
+            exit 1
+          fi
+
+          # Remote coverage gate keeps production readiness aligned with the local pre-commit policy.
+          awk -v total="$total_coverage" -v minimum="$MINIMUM_COVERAGE" '
+            BEGIN {
+              if (total + 0 < minimum + 0) {
+                printf "Coverage %.1f%% is below the required %.1f%%.\n", total, minimum > "/dev/stderr"
+                exit 1
+              }
+              printf "Coverage %.1f%% meets the required %.1f%%.\n", total, minimum
+            }
+          '
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Vulnerability scan
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" ./...
