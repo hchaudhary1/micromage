@@ -209,6 +209,36 @@ func TestDefaultCommandTemplatesAreVendored(t *testing.T) {
 	}
 }
 
+func TestWorkflowBuilderGuidanceIsMicromageNative(t *testing.T) {
+	path := filepath.Join(referenceDefaultsDir(), "micromage-workflow-builder.yaml")
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(bytes)
+	for _, want := range []string{
+		"type: human_gate",
+		"route.on_failure",
+		"go run ./cmd/micromage validate",
+		"Do not use Archon-only fields",
+		"Do not assume npm, node, bun, or TypeScript",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("workflow builder missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"runtime: bun",
+		"bun run",
+		"Node inspector",
+		"frontend builder",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("workflow builder still contains Archon/Node-specific guidance %q", forbidden)
+		}
+	}
+}
+
 func TestDefaultWorkflowCommandReferencesResolveLocally(t *testing.T) {
 	workflowEntries, err := os.ReadDir(referenceDefaultsDir())
 	if err != nil {

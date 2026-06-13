@@ -1,248 +1,175 @@
 name: micromage-workflow-builder
 description: |
-  Use when: User wants to create a new custom workflow for their project.
+  Use when: User wants to create a new custom Micromage workflow from a plain-English process description.
   Triggers: "build me a workflow", "create a workflow", "generate a workflow",
             "new workflow", "make a workflow for", "workflow builder".
-  Does: Scans codebase -> extracts intent (JSON) -> generates YAML -> validates -> saves.
-  NOT for: Editing existing workflows or creating non-workflow files.
+  Does: Inspects repo context, designs a Micromage-native DAG, pauses for approval,
+        writes workflow YAML, validates it, and reports the run command.
+  NOT for: Editing existing workflows, adding visual builders, or creating non-workflow files.
+
+provider: opencode
+model: opencode/deepseek-v4-flash-free
 
 nodes:
-  - id: scan-codebase
-    bash: |
-      echo "=== Existing Commands ==="
-      if [ -d ".micromage/commands" ]; then
-        find .micromage/commands -type f -name "*.md" 2>/dev/null | head -30
-      else
-        echo "(no .micromage/commands/ directory)"
-      fi
+  scan-context:
+    type: command
+    command: |
+      echo "=== Repository ==="
+      pwd
+      find . -maxdepth 2 -type f \( -name 'AGENTS.md' -o -name 'README.md' -o -name 'go.mod' \) | sort
 
       echo ""
-      echo "=== Existing Workflows ==="
-      if [ -d ".micromage/workflows" ]; then
-        find .micromage/workflows -type f \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null | head -30
-      else
-        echo "(no .micromage/workflows/ directory)"
-      fi
+      echo "=== Default Workflows ==="
+      find assets/defaults/workflows -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) 2>/dev/null | sort | sed -n '1,80p'
 
       echo ""
-      echo "=== Package Info ==="
-      if [ -f "package.json" ]; then
-        grep -E '"name"|"scripts"' package.json | head -10
-      else
-        echo "(no package.json)"
-      fi
+      echo "=== Default Commands ==="
+      find assets/defaults/commands -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort | sed -n '1,80p'
 
       echo ""
-      echo "=== Project Context (CLAUDE.md first 50 lines) ==="
-      if [ -f "CLAUDE.md" ]; then
-        head -50 CLAUDE.md
-      else
-        echo "(no CLAUDE.md)"
-      fi
+      echo "=== Project Skill ==="
+      sed -n '1,220p' .agents/skills/micromage/SKILL.md 2>/dev/null || true
 
-  - id: extract-intent
+  design-workflow:
+    type: agent
     prompt: |
-      You are a workflow design classifier. Given a user's description of what they want
-      a workflow to do, extract structured intent.
+      Design a Micromage workflow for this request:
 
-      ## User's Request
       $ARGUMENTS
 
-      ## Codebase Context
-      $scan-codebase.output
+      Repository context:
 
-      ## Instructions
+      $scan-context.output
 
-      Analyze the user's request and the existing codebase to determine:
-      1. A kebab-case workflow name (e.g., "lint-and-test", "deploy-staging")
-      2. A description following the Micromage pattern (Use when / Triggers / Does / NOT for)
-      3. Trigger phrases the router should match
-      4. A list of proposed nodes with their types and purposes
-      5. Whether this should be a simple DAG or include a loop node
+      Produce a concise design for a valid Micromage workflow. Include:
+      - workflow name in kebab case, prefixed with micromage- only if it belongs in defaults
+      - one-sentence purpose
+      - trigger phrases
+      - nodes with id, type, purpose, dependencies, and any when/trigger_rule/route behavior
+      - where human_gate nodes are needed
+      - which nodes should be deterministic command nodes vs provider-backed agent nodes
 
-      Be specific and concrete. Each proposed node should have a clear type
-      (bash, prompt, command, script, loop, or approval) and a one-line
-      description of what it does.
-    model: small
-    allowed_tools: []
-    output_format:
-      type: object
-      properties:
-        workflow_name:
-          type: string
-        description:
-          type: string
-        trigger_phrases:
-          type: string
-        proposed_nodes:
-          type: string
-        execution_mode:
-          type: string
-          enum: ["dag", "loop"]
-      required: [workflow_name, description, trigger_phrases, proposed_nodes, execution_mode]
-    depends_on: [scan-codebase]
+      Micromage node model:
+      - command: deterministic shell command or multiline shell script in command
+      - agent: provider-backed reasoning or code work, using prompt or command template
+      - human_gate: pauses until approved, usually before risky writes or publishing
+      - loop: repeated agent prompt until its until token appears or max_iterations is reached
+      - depends_on: DAG edges; independent nodes in the same layer run concurrently
+      - when: conditional expression based on prior node output
+      - trigger_rule: all_success, one_success, or all_done
+      - route.on_failure: jump to an earlier repair node with max_iterations controls
+      - $node.output.field: works only when the node output is valid JSON
 
-  - id: generate-yaml
-    prompt: |
-      You are an Micromage workflow author. Generate a complete, valid workflow YAML file
-      based on the structured intent provided.
-
-      ## Intent
-      - **Name**: $extract-intent.output.workflow_name
-      - **Description**: $extract-intent.output.description
-      - **Trigger Phrases**: $extract-intent.output.trigger_phrases
-      - **Proposed Nodes**: $extract-intent.output.proposed_nodes
-      - **Execution Mode**: $extract-intent.output.execution_mode
-
-      ## Original User Request
-      $ARGUMENTS
-
-      ## Micromage Workflow YAML Schema Reference
-
-      A workflow YAML file has this structure:
+      Failure-route example:
 
       ```yaml
-      name: workflow-name
-      description: |
-        Use when: ...
-        Triggers: ...
-        Does: ...
-        NOT for: ...
-
-      # Optional top-level settings:
-      # provider: claude    (or codex)
-      # model: medium       (or haiku, opus, etc.)
-      # interactive: true   (forces foreground execution in web UI)
-
-      nodes:
-        - id: node-id-kebab-case
-          # Choose ONE of: prompt, bash, command, script, loop, approval
-
-          # --- prompt node (AI-executed) ---
-          prompt: |
-            Instructions for the AI...
-          # Optional: model, allowed_tools, denied_tools, output_format, context, idle_timeout
-
-          # --- bash node (shell script, no AI, stdout = $<nodeId>.output) ---
-          bash: |
-            #!/bin/bash
-            set -e
-            echo "result"
-
-          # --- command node (references a .micromage/commands/ file) ---
-          command: command-name
-
-          # --- script node (TypeScript via bun, or Python via uv — no AI, stdout = $<nodeId>.output) ---
-          # Use for deterministic data transforms the shell would mangle (JSON parsing, etc.)
-          script: |
-            // JSON is valid JS expression syntax — assign directly (String.raw breaks on backticks)
-            const data = $other-node.output;
-            console.log(JSON.stringify({ count: data.items.length }));
-          runtime: bun                       # required: 'bun' (.ts/.js) or 'uv' (.py)
-          # deps: [requests]                 # uv only
-          # Or reference a named script in .micromage/scripts/:
-          # script: extract-labels           # no extension; bun resolves .ts/.js, uv resolves .py
-
-          # --- loop node (iterative AI execution) ---
-          loop:
-            prompt: |
-              Instructions repeated each iteration...
-            until: COMPLETION_SIGNAL
-            max_iterations: 10
-            fresh_context: true  # optional: reset context each iteration
-
-          # --- approval node (human gate — pauses workflow) ---
-          approval:
-            message: "Review the plan above. Approve to continue."
-            # capture_response: true         # store reviewer comment as $<nodeId>.output
-
-          # Common options for all node types:
-          depends_on: [other-node-id]       # DAG edges
-          when: "$<other-node>.output == 'value'"  # conditional execution
-          trigger_rule: all_success          # all_success | one_success | all_done
-          timeout: 120000                    # ms, for bash and script nodes
+      repair:
+        type: agent
+        prompt: Fix the validation failure using $validate.output
+      validate:
+        type: command
+        command: go test ./...
+        depends_on: [repair]
+        route:
+          on_failure:
+            to: repair
+            max_iterations: 2
+            max_repeated_failures: 2
       ```
 
-      ## Variable Reference
-      - `$ARGUMENTS` — user's input text
-      - `$ARTIFACTS_DIR` — pre-created directory for workflow artifacts
-      - `$<nodeId>.output` — stdout from a bash/script node or AI response from a prompt node
-      - `$<nodeId>.output.field` — JSON field from a node with output_format
-      - `$BASE_BRANCH` — base git branch
+      Conditional branch example:
 
-      ## Rules
-      1. The `name:` field MUST match: $extract-intent.output.workflow_name
-      2. The `description:` MUST follow the "Use when / Triggers / Does / NOT for" pattern
-      3. Every node MUST have a unique kebab-case `id`
-      4. Use `depends_on` to define execution order
-      5. Use `bash` nodes for deterministic shell operations (file checks, git commands, installs)
-      6. Use `script` nodes for typed data transforms (TypeScript JSON parsing, Python with deps)
-         — stdout is captured as output, stderr is forwarded as a warning.
-         `$nodeId.output` is NOT shell-quoted in script bodies.
-         - **TypeScript/bun**: assign directly — `const data = $nodeId.output;`
-           (JSON is valid JS expression syntax; avoid String.raw — it breaks on backticks)
-         - **Python/uv**: use json.loads — `import json; data = json.loads("""$nodeId.output""")`
-         Never interpolate into shell syntax.
-      7. Use `prompt` nodes for AI reasoning tasks
-      8. Use `approval` nodes to pause for human review at risky gates (plan→execute boundary, destructive actions)
-      9. Use `output_format` on prompt nodes when downstream nodes need structured data
-      10. Use `allowed_tools: []` on classification/analysis nodes that don't need tools
-      11. Use `denied_tools: [Edit, Bash]` when a node should only use Write (not edit existing files)
-      12. Prefer `model: small` for simple classification tasks to save cost
+      ```yaml
+      classify:
+        type: agent
+        prompt: |
+          Classify the work. End with only JSON like:
+          {"path":"bug"}
+      bug-path:
+        type: agent
+        prompt: Fix the bug.
+        depends_on: [classify]
+        when: "$classify.output.path == 'bug'"
+      ```
 
-      ## Output
+      Do not use Archon-only fields such as script, runtime, bash, approval, cancel, or visual-builder concepts.
+      Do not assume npm, node, bun, or TypeScript.
+    depends_on: [scan-context]
 
-      Write the complete workflow YAML to: `$ARTIFACTS_DIR/generated-workflow.yaml`
+  approve-design:
+    type: human_gate
+    message: "Review the proposed workflow design. Approve to generate and validate YAML."
+    depends_on: [design-workflow]
 
-      Use the Write tool. Do NOT use Edit or Bash. The file must be valid YAML and follow
-      all the patterns above.
-    denied_tools: [Edit, Bash]
-    depends_on: [extract-intent]
+  generate-yaml:
+    type: agent
+    prompt: |
+      Generate the complete Micromage workflow YAML for this approved design:
 
-  - id: validate-yaml
-    bash: |
-      FILE="$ARTIFACTS_DIR/generated-workflow.yaml"
+      $design-workflow.output
 
-      if [ ! -f "$FILE" ]; then
-        echo "ERROR: generated-workflow.yaml not found at $FILE"
+      Original request:
+
+      $ARGUMENTS
+
+      Requirements:
+      - Write the file to assets/defaults/workflows/<workflow-name>.yaml unless the design says it is project-specific.
+      - Use only Micromage-supported fields: name, description, provider, model, interactive, worktree, nodes.
+      - Use mapping-style nodes unless a sequence is clearer.
+      - For command nodes, set type: command and command:.
+      - For agent nodes, set type: agent and prompt: or command: <template-name>.
+      - For human gates, set type: human_gate and message:.
+      - For loop nodes, set type: loop and loop.prompt, loop.until, loop.max_iterations.
+      - Use depends_on for ordering and parallelism.
+      - Use when and trigger_rule where routing is needed.
+      - Use route.on_failure only for repair loops that jump to an earlier node.
+      - Make classification outputs valid JSON when downstream nodes use $node.output.field.
+      - Failure route targets must be earlier in dependency order; Micromage reruns forward from the repair target after a failure.
+      - Include one short YAML comment explaining the business reason for any non-obvious gate or route.
+      - Do not use npm, node, bun, TypeScript, frontend code, or Archon-only fields.
+
+      After writing the file, report only:
+      - path written
+      - workflow name
+      - validation command to run
+    depends_on: [approve-design]
+
+  validate-generated:
+    type: command
+    command: |
+      set -eu
+      NAME=$(printf '%s\n' "$generate-yaml.output" | awk 'tolower($0) ~ /workflow name/ { sub(/.*workflow name[: ]*/, "", $0); print; exit }' | tr -d '`"[:space:]')
+      PATH_LINE=$(printf '%s\n' "$generate-yaml.output" | grep -Eo 'assets/defaults/workflows/[A-Za-z0-9._/-]+\.ya?ml' | head -1 || true)
+
+      if [ -n "$PATH_LINE" ]; then
+        FILE="$PATH_LINE"
+      elif [ -n "$NAME" ] && [ -f "assets/defaults/workflows/$NAME.yaml" ]; then
+        FILE="assets/defaults/workflows/$NAME.yaml"
+      else
+        echo "Could not determine generated workflow path from generator output:"
+        printf '%s\n' "$generate-yaml.output"
         exit 1
       fi
 
-      if [ ! -s "$FILE" ]; then
-        echo "ERROR: generated-workflow.yaml is empty"
-        exit 1
-      fi
-
-      if ! grep -q "^name:" "$FILE"; then
-        echo "ERROR: missing 'name:' field"
-        exit 1
-      fi
-
-      if ! grep -q "^nodes:" "$FILE"; then
-        echo "ERROR: missing 'nodes:' field"
-        exit 1
-      fi
-
-      echo "VALID"
+      go run ./cmd/micromage validate --workflow "$FILE"
+      echo "validated $FILE"
     depends_on: [generate-yaml]
 
-  - id: save-or-report
+  report:
+    type: agent
     prompt: |
-      You are a workflow installer. Save the generated workflow and report to the user.
+      Summarize the generated workflow for the user.
 
-      ## Workflow Details
-      - **Name**: $extract-intent.output.workflow_name
-      - **Trigger Phrases**: $extract-intent.output.trigger_phrases
+      Generator output:
+      $generate-yaml.output
 
-      ## Instructions
+      Validation output:
+      $validate-generated.output
 
-      1. Read the generated workflow from `$ARTIFACTS_DIR/generated-workflow.yaml`
-      2. Create the directory `.micromage/workflows/` if it doesn't exist (use Bash: `mkdir -p .micromage/workflows/`)
-      3. Save the workflow to `.micromage/workflows/$extract-intent.output.workflow_name.yaml`
-         Use the Write tool to write the file.
-      4. Report to the user:
-         - Workflow name and file location
-         - Trigger phrases that will invoke it
-         - How to run it: `bun run cli workflow run $extract-intent.output.workflow_name "your input"`
-         - How to test it: `bun run cli validate workflows $extract-intent.output.workflow_name`
-    depends_on: [validate-yaml]
+      Include:
+      - what workflow was created
+      - where it was saved
+      - what validation passed
+      - example foreground run command
+      - example detached run command
+    depends_on: [validate-generated]
