@@ -92,7 +92,7 @@ nodes:
         when: "$classify.output.path == 'bug'"
       ```
 
-      Do not use Archon-only fields such as script, runtime, bash, approval, cancel, or visual-builder concepts.
+      Do not use non-Micromage fields such as script, runtime, bash, approval, cancel, or visual-builder concepts.
       Do not assume npm, node, bun, or TypeScript.
     depends_on: [scan-context]
 
@@ -126,7 +126,7 @@ nodes:
       - Make classification outputs valid JSON when downstream nodes use $node.output.field.
       - Failure route targets must be earlier in dependency order; Micromage reruns forward from the repair target after a failure.
       - Include one short YAML comment explaining the business reason for any non-obvious gate or route.
-      - Do not use npm, node, bun, TypeScript, frontend code, or Archon-only fields.
+      - Do not use npm, node, bun, TypeScript, frontend code, or non-Micromage fields.
 
       After writing the file, report only:
       - path written

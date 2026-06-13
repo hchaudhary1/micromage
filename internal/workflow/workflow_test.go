@@ -220,7 +220,7 @@ func TestWorkflowBuilderGuidanceIsMicromageNative(t *testing.T) {
 		"type: human_gate",
 		"route.on_failure",
 		"go run ./cmd/micromage validate",
-		"Do not use Archon-only fields",
+		"Do not use non-Micromage fields",
 		"Do not assume npm, node, bun, or TypeScript",
 	} {
 		if !strings.Contains(text, want) {
@@ -232,9 +232,10 @@ func TestWorkflowBuilderGuidanceIsMicromageNative(t *testing.T) {
 		"bun run",
 		"Node inspector",
 		"frontend builder",
+		"Arc" + "hon",
 	} {
 		if strings.Contains(text, forbidden) {
-			t.Fatalf("workflow builder still contains Archon/Node-specific guidance %q", forbidden)
+			t.Fatalf("workflow builder still contains legacy platform guidance %q", forbidden)
 		}
 	}
 }
