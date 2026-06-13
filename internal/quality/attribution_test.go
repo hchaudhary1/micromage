@@ -19,3 +19,22 @@ func TestDetectBannedAttributionIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("got %d findings, want 1", len(findings))
 	}
 }
+
+func TestDetectBannedAttributionIncludesProjectSpecificTerms(t *testing.T) {
+	for _, term := range []string{
+		bannedTerm("arc", "hon"),
+		bannedTerm("junho", "yeo"),
+		bannedTerm("contra", "bass"),
+		bannedTerm("cole", "am00"),
+	} {
+		t.Run(term, func(t *testing.T) {
+			findings := DetectBannedAttribution("note.md", "mentions "+term+"\n", nil)
+			if len(findings) != 1 {
+				t.Fatalf("got %d findings, want 1", len(findings))
+			}
+			if findings[0].Term != term {
+				t.Fatalf("got term %q, want %q", findings[0].Term, term)
+			}
+		})
+	}
+}

@@ -11,6 +11,11 @@ var DefaultBannedAttributionTerms = []string{
 	bannedTerm("Co-Authored-By: ", "Codex"),
 	bannedTerm("Co-Authored-By: ", "OpenAI"),
 	bannedTerm("AI-", "generated"),
+	// Block project-specific attribution markers that should not enter commits.
+	bannedTerm("arc", "hon"),
+	bannedTerm("junho", "yeo"),
+	bannedTerm("contra", "bass"),
+	bannedTerm("cole", "am00"),
 }
 
 func bannedTerm(prefix, suffix string) string {
