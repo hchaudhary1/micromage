@@ -1,0 +1,4 @@
+interface:
+  display_name: "Micromage"
+  short_description: "Workflows, detached runs, and Go quality"
+  default_prompt: "Use $micromage to author, run, inspect, or modify Micromage workflows."
