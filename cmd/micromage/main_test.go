@@ -7,7 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/hchaudhary1/micromage/internal/detach"
+	"github.com/hchaudhary1/micromage/internal/engine"
+	"github.com/hchaudhary1/micromage/internal/runregistry"
 	"github.com/hchaudhary1/micromage/internal/state"
 )
 
@@ -136,6 +140,148 @@ nodes:
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("dashboard missing %q:\n%s", want, rendered)
 		}
+	}
+}
+
+func TestExecuteRunDetachStartsChildAndWritesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "workflow.yaml")
+	if err := os.WriteFile(workflowPath, []byte(`
+name: detached smoke
+nodes:
+  hello:
+    type: command
+    command: echo hello
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spawner := &fakeSpawner{pid: 4321}
+	restore := replaceDetachedHooks(t, spawner, func() (string, error) { return "/bin/micromage-test", nil })
+	defer restore()
+
+	var out bytes.Buffer
+	code := execute([]string{"run", "--detach", "--workflow", workflowPath, "--workdir", dir, "--run-id", "detached-1"}, &out, &out)
+	if code != 0 {
+		t.Fatalf("detached run failed: code=%d out=%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "detached run started") || !strings.Contains(out.String(), "micromage watch --run-id detached-1") {
+		t.Fatalf("missing detached start hints: %s", out.String())
+	}
+	if len(spawner.requests) != 1 {
+		t.Fatalf("expected one detached launch, got %d", len(spawner.requests))
+	}
+	req := spawner.requests[0]
+	if req.Argv[0] != "/bin/micromage-test" || req.Argv[1] != "__run-detached" {
+		t.Fatalf("unexpected child argv: %#v", req.Argv)
+	}
+	metadata, err := runregistry.Load(filepath.Join(dir, ".micromage", "runs", "detached-1", "run.json"), func(pid int) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.PID != 4321 || metadata.Status != runregistry.StatusRunning {
+		t.Fatalf("unexpected metadata: %#v", metadata)
+	}
+	if metadata.LogPath != filepath.Join(dir, ".micromage", "runs", "detached-1", "run.jsonl") {
+		t.Fatalf("unexpected detached log path: %s", metadata.LogPath)
+	}
+}
+
+func TestExecuteDetachedStatusRunsAndWatchByRunID(t *testing.T) {
+	dir := t.TempDir()
+	metadata := runregistry.NewMetadata("run-1", "detached smoke", filepath.Join(dir, "workflow.yaml"), dir, nil, nil, os.Getpid(), time.Now().UTC())
+	paths := runregistry.DefaultPaths(dir, metadata.RunID)
+	metadata.LogPath = paths.LogPath
+	metadata.StatePath = paths.StatePath
+	metadata.ProcessLogPath = paths.ProcessLogPath
+	if err := runregistry.Save(paths.MetadataPath, metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.LogPath, []byte(`{"type":"workflow_started","message":"detached smoke"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var statusOut bytes.Buffer
+	if code := execute([]string{"status", "--workdir", dir, "--run-id", "run-1"}, &statusOut, &statusOut); code != 0 {
+		t.Fatalf("status failed: code=%d out=%s", code, statusOut.String())
+	}
+	if !strings.Contains(statusOut.String(), "Status: running") || !strings.Contains(statusOut.String(), "Process log:") {
+		t.Fatalf("unexpected status output: %s", statusOut.String())
+	}
+
+	var runsOut bytes.Buffer
+	if code := execute([]string{"runs", "--workdir", dir}, &runsOut, &runsOut); code != 0 {
+		t.Fatalf("runs failed: code=%d out=%s", code, runsOut.String())
+	}
+	if !strings.Contains(runsOut.String(), "run-1") || !strings.Contains(runsOut.String(), "detached smoke") {
+		t.Fatalf("unexpected runs output: %s", runsOut.String())
+	}
+
+	var watchOut bytes.Buffer
+	if code := execute([]string{"watch", "--workdir", dir, "--run-id", "run-1", "--once"}, &watchOut, &watchOut); code != 0 {
+		t.Fatalf("watch failed: code=%d out=%s", code, watchOut.String())
+	}
+	if !strings.Contains(watchOut.String(), "detached smoke") {
+		t.Fatalf("watch did not resolve run log: %s", watchOut.String())
+	}
+}
+
+func TestFinalizeDetachedMetadataMapsHumanGateToPaused(t *testing.T) {
+	dir := t.TempDir()
+	metadata := runregistry.NewMetadata("run-1", "gated", "workflow.yaml", dir, nil, nil, os.Getpid(), time.Now().UTC())
+	paths := runregistry.DefaultPaths(dir, metadata.RunID)
+	if err := runregistry.Save(paths.MetadataPath, metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	finalizeDetachedMetadata(paths.MetadataPath, 1, engine.ErrHumanGate)
+
+	loaded, err := runregistry.Load(paths.MetadataPath, func(pid int) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != runregistry.StatusPaused || loaded.ExitCode != 1 {
+		t.Fatalf("expected paused metadata, got %#v", loaded)
+	}
+}
+
+func TestDetachedChildCommandExecutesRunAndFinalizesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	workflowPath := filepath.Join(dir, "workflow.yaml")
+	if err := os.WriteFile(workflowPath, []byte(`
+name: child smoke
+nodes:
+  hello:
+    type: command
+    command: echo child
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := runregistry.NewMetadata("child-1", "child smoke", workflowPath, dir, nil, nil, os.Getpid(), time.Now().UTC())
+	paths := runregistry.DefaultPaths(dir, metadata.RunID)
+	metadata.LogPath = paths.LogPath
+	metadata.StatePath = paths.StatePath
+	metadata.ProcessLogPath = paths.ProcessLogPath
+	if err := runregistry.Save(paths.MetadataPath, metadata); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code := execute([]string{"__run-detached", "--metadata", paths.MetadataPath, "--",
+		"--workflow", workflowPath,
+		"--log", paths.LogPath,
+		"--state", paths.StatePath,
+		"--workdir", dir,
+		"--run-id", "child-1",
+	}, &out, &out)
+	if code != 0 {
+		t.Fatalf("detached child failed: code=%d out=%s", code, out.String())
+	}
+	loaded, err := runregistry.Load(paths.MetadataPath, func(pid int) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != runregistry.StatusPassed || loaded.ExitCode != 0 {
+		t.Fatalf("expected passed metadata, got %#v", loaded)
 	}
 }
 
@@ -331,5 +477,27 @@ func runTestCmd(t *testing.T, dir, name string, args ...string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
+	}
+}
+
+type fakeSpawner struct {
+	pid      int
+	requests []detach.LaunchRequest
+}
+
+func (f *fakeSpawner) Launch(req detach.LaunchRequest) (int, error) {
+	f.requests = append(f.requests, req)
+	return f.pid, nil
+}
+
+func replaceDetachedHooks(t *testing.T, spawner detach.Spawner, exe func() (string, error)) func() {
+	t.Helper()
+	oldSpawner := detachedSpawner
+	oldExecutablePath := executablePath
+	detachedSpawner = spawner
+	executablePath = exe
+	return func() {
+		detachedSpawner = oldSpawner
+		executablePath = oldExecutablePath
 	}
 }

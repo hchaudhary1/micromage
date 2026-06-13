@@ -16,6 +16,20 @@ Run a workflow and write JSONL events:
 go run ./cmd/micromage run --workflow testdata/workflows/smoke.yaml --log .micromage/run.jsonl
 ```
 
+Run a long workflow in the background without installing a daemon:
+
+```bash
+go run ./cmd/micromage run --detach --workflow testdata/workflows/smoke.yaml
+```
+
+Detached runs are recorded under `.micromage/runs/<run-id>/` by default. Inspect them with:
+
+```bash
+go run ./cmd/micromage runs
+go run ./cmd/micromage status --run-id latest
+go run ./cmd/micromage watch --run-id latest
+```
+
 Use `type: command` nodes for shell snippets or direct executables with `args`. Use `type: human_gate` to pause the pipeline for reviewer approval. Add `depends_on` to express node dependencies; independent nodes in the same dependency layer run concurrently.
 
 Run agent/template nodes through OpenCode:
